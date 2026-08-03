@@ -30,10 +30,10 @@
   * Detección automática de ubicaciones mediante LLM.
   * Consulta directa a la API de Open-Meteo para obtener temperaturas (máxima y mínima) y probabilidad de precipitación sin depender de búsquedas web genéricas.
 
-* 🌐 **Búsqueda Web en Tiempo Real (DuckDuckGo + Optimización LLM):**
+* 🌐 **Búsqueda Web en Tiempo Real (Tavily Search API + Optimización LLM):**
   * Clasificador inteligente de intenciones (`WEATHER`, `CV_OPTIMIZATION`, `DOMOTICS_CONTROL`, `WEB_SEARCH`, `GENERAL_CHAT`).
-  * Optimizador de consultas para transformar lenguaje natural en palabras clave eficientes de búsqueda.
-  * Extracción y síntesis de resultados actualizados.
+  * Integración con **Tavily Search API** para la extracción directa y precisa de información en tiempo real sin bloqueos en la nube.
+  * Optimizador de consultas para transformar lenguaje natural en palabras clave eficientes de búsqueda y síntesis de resultados actualizados.
 
 ---
 
@@ -50,7 +50,7 @@
 * **Modelos LLM:** Groq / LiteLLM (`llama-3.1-8b-instant`, `groq/whisper-large-v3`).
 * **Orquestación Multi-Agente:** CrewAI.
 * **Base de Datos:** MongoDB Atlas Cloud (PyMongo).
-* **Búsquedas & Clima:** Open-Meteo API, DuckDuckGo Search (`ddgs`).
+* **Búsquedas & Clima:** Tavily Search API (`tavily-python`), Open-Meteo API, DuckDuckGo Search (`duckduckgo_search`).
 
 ### **Infraestructura & Cloud**
 * **Hosting App & API:** Render Cloud Platform.
@@ -93,6 +93,7 @@ ai-alexis/
 ```ini
 GROQ_API_KEY=tu_api_key_de_groq
 MONGODB_URI=mongodb+srv://<usuario>:<password>@cluster0.mongodb.net/?retryWrites=true&w=majority
+TAVILY_API_KEY=tu_api_key_de_tavily
 ```
 
 ### **Frontend (`.env.local`)**
@@ -134,14 +135,17 @@ NEXT_PUBLIC_API_URL=[https://ai-alexis-backend.onrender.com/api/v1](https://ai-a
 
 ## ☁️ Despliegue en Producción (Render)
 
-1. **Backend (Web Service):** Conectar repositorio GitHub en Render, configurar entorno Python 3.11+, comando de inicio `uvicorn app.main:app --host 0.0.0.0 --port $PORT` y añadir variables `GROQ_API_KEY` y `MONGODB_URI`.
+1. **Backend (Web Service):** Conectar repositorio GitHub en Render, configurar entorno Python 3.11+, comando de inicio `uvicorn app.main:app --host 0.0.0.0 --port $PORT` y añadir variables `GROQ_API_KEY`, `MONGODB_URI` y `TAVILY_API_KEY`.
 2. **Frontend (Web Service / Static Site):** Conectar repositorio de Next.js, añadir variables `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` y `NEXT_PUBLIC_API_URL`.
 
+---
+
 ## 🏆 Resumen: Arquitectura en Producción
-- 🔐 Autenticación: Clerk (Google / Email).
-- 🧠 Memoria Persistente: MongoDB Atlas Cloud (historial e identidad por user_id).
-- ⚡ Inferencia de Alto Rendimiento: Groq (Llama 3.1 8B Instant).
-- 🌐 Búsqueda Web en Tiempo Real: Tavily Search API.
-- 🎙️ Transcripción de Voz: Whisper Large v3.
-- 🤖 Agentes Autónomos: CrewAI para optimización de CVs.
-- 🌤️ Servicio Meteorológico: Open-Meteo API.
+
+* 🔐 **Autenticación:** Clerk (Google / Email).
+* 🧠 **Memoria Persistente:** MongoDB Atlas Cloud (historial e identidad por `user_id`).
+* ⚡ **Inferencia de Alto Rendimiento:** Groq (`Llama 3.1 8B Instant`).
+* 🌐 **Búsqueda Web en Tiempo Real:** Tavily Search API.
+* 🎙️ **Transcripción de Voz:** Whisper Large v3.
+* 🤖 **Agentes Autónomos:** CrewAI para optimización de CVs.
+* 🌤️ **Servicio Meteorológico:** Open-Meteo API.
