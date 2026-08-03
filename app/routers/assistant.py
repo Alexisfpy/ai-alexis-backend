@@ -10,6 +10,7 @@ from pymongo import MongoClient  # Driver de MongoDB
 from dotenv import load_dotenv
 from pathlib import Path
 from app.services.weather_service import obtener_clima_open_meteo # Servicio de Clima Open-Meteo
+from tavily import TavilyClient # Mejora buscador 
 
 # FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env (subiendo desde app/routers/ hasta la raíz)
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
