@@ -2,13 +2,14 @@ import os
 import io
 import litellm
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from app.schemas.assistant import AssistantResponse
+from app.schemas.assistant import AssistantRequest, AssistantResponse
 from ddgs import DDGS
 from crewai import Agent, Task, Crew, Process, LLM
 from pypdf import PdfReader
-from pymongo import MongoClient  # <-- Importamos el driver de MongoDB
-from dotenv import load_dotenv  # <-- 1. Importamos el cargador
+from pymongo import MongoClient  # Driver de MongoDB
+from dotenv import load_dotenv
 from pathlib import Path
+from app.services.weather_service import obtener_clima_open_meteo # Servicio de Clima Open-Meteo
 
 # FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env (subiendo desde app/routers/ hasta la raíz)
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -82,7 +83,6 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
         prompt_optimizador = (
             "Tu único trabajo es convertir un mensaje conversacional en una consulta de búsqueda "
             "ultra-eficiente de 2 a 4 palabras clave para un buscador web.\n"
-            "Ejemplo: 'Dime el tiempo de Fuerteventura para mañana.' -> 'clima Fuerteventura mañana'\n"
             "Ejemplo: '¿Sabes quién ganó el partido de ayer del Real Madrid?' -> 'resultado Real Madrid ayer'\n\n"
             "REGLA ESTRICTA: Responde ÚNICAMENTE con las palabras clave sugeridas, sin introducciones, sin comillas y sin explicaciones."
         )
@@ -120,17 +120,18 @@ def buscar_en_internet(query: str) -> str:
         return f"Error de conexión con el motor de búsqueda: {str(e)}"
 
 
-# --- PROCESADOR CENTRAL DE INTENCIONES (CREWAI CON MONGO) ---
-def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> AssistantResponse:
+# --- PROCESADOR CENTRAL DE INTENCIONES (ASÍNCRONO CON CLIMA Y MONGO) ---
+async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> AssistantResponse:
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
     system_prompt = (
         "Eres el clasificador de intenciones de AI Alexis.\n"
-        "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cuatro palabras:\n"
+        "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
+        "- 'WEATHER' (si pregunta por el tiempo, clima, temperatura, grados, predicción meteorológica o lluvia)\n"
         "- 'CV_OPTIMIZATION' (si quiere adaptar su CV, currículum o habla de ofertas de empleo)\n"
         "- 'DOMOTICS_CONTROL' (si habla de controlar luces, sensores, domótica o IoT)\n"
-        "- 'WEB_SEARCH' (si pregunta por el clima, previsiones, noticias, resultados, eventos o cualquier dato que requiera internet)\n"
+        "- 'WEB_SEARCH' (noticias, resultados deportivos, eventos o datos en tiempo real que NO sean el clima)\n"
         "- 'GENERAL_CHAT' (para saludos, charla casual, programación o dudas de conocimiento estático)\n\n"
         "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas, sin introducciones ni explicaciones."
     )
@@ -149,9 +150,74 @@ def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> Assist
     user_intent = classification.choices[0].message.content.strip().upper()
     user_intent = user_intent.replace("'", "").replace('"', "").replace(".", "").strip()
 
-    if "CV_OPTIMIZATION" in user_intent:
+    # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA (OPEN-METEO) ---
+    if "WEATHER" in user_intent:
         try:
-            # 1. Extracción de la oferta
+            # Extraer la ubicación de forma limpia
+            prompt_ubicacion = (
+                "Extrae ÚNICAMENTE el nombre de la ciudad, isla o municipio mencionado en el mensaje del usuario.\n"
+                "Ejemplo: 'Dime los grados de temperatura para mañana en Fuerteventura' -> 'Fuerteventura'\n"
+                "Ejemplo: '¿Va a llover en Sevilla hoy?' -> 'Sevilla'\n"
+                "Si no detectas ninguna ubicación explícita, responde 'Fuerteventura'.\n"
+                "REGLA ESTRICTA: Responde SOLO con el nombre de la ubicación sin comillas ni signos."
+            )
+            res_loc = litellm.completion(
+                model="openai/llama-3.1-8b-instant",
+                api_key=api_key,
+                base_url="https://api.groq.com/openai/v1",
+                messages=[
+                    {"role": "system", "content": prompt_ubicacion},
+                    {"role": "user", "content": message}
+                ],
+                temperature=0.0
+            )
+            ubicacion = res_loc.choices[0].message.content.strip().replace('"', '').replace("'", "")
+            
+            # Consultar servicio Open-Meteo
+            datos_clima = await obtener_clima_open_meteo(ubicacion)
+
+            if datos_clima:
+                contexto_clima = (
+                    f"DATOS CLIMÁTICOS OFICIALES EN TIEMPO REAL PARA {datos_clima['ubicacion']}:\n"
+                    f"- HOY: Temp. Máxima {datos_clima['hoy']['max']}°C, Temp. Mínima {datos_clima['hoy']['min']}°C, Probabilidad de lluvia {datos_clima['hoy']['prob_lluvia']}%\n"
+                    f"- MAÑANA: Temp. Máxima {datos_clima['manana']['max']}°C, Temp. Mínima {datos_clima['manana']['min']}°C, Probabilidad de lluvia {datos_clima['manana']['prob_lluvia']}%\n"
+                )
+            else:
+                contexto_clima = f"No se han podido consultar los datos automáticos para la ubicación {ubicacion}."
+
+            prompt_respuesta_clima = (
+                "Eres AI Alexis, un asistente virtual directo, inteligente y elegante (inspirado en J.A.R.V.I.S.).\n\n"
+                "REGLAS OBLIGATORIAS DE RESPUESTA:\n"
+                "1. Responde de forma clara y directa con las temperaturas exactas en °C (máxima y mínima) y la probabilidad de lluvia.\n"
+                "2. Si la consulta menciona 'mañana', prioriza dar los datos del pronóstico de mañana.\n"
+                "3. NUNCA sugieras al usuario buscar en webs externas ni le expliques cómo usar un buscador.\n"
+                "4. NUNCA incluyas enlaces, URLs ni corchetes [1], [2] de fuentes de internet.\n"
+                "5. Sé natural, conversacional y conciso.\n\n"
+                f"{contexto_clima}\n\n"
+                f"Consulta del usuario: {message}"
+            )
+
+            chat_response = litellm.completion(
+                model="openai/llama-3.1-8b-instant",
+                api_key=api_key,
+                base_url="https://api.groq.com/openai/v1",
+                messages=[{"role": "user", "content": prompt_respuesta_clima}]
+            )
+
+            return AssistantResponse(
+                intent="WEATHER",
+                response=chat_response.choices[0].message.content
+            )
+
+        except Exception as e:
+            return AssistantResponse(
+                intent="WEATHER",
+                response=f"No pude consultar la información meteorológica en este momento: {str(e)}"
+            )
+
+    # --- 2. INTENCIÓN: OPTIMIZACIÓN DE CV ---
+    elif "CV_OPTIMIZATION" in user_intent:
+        try:
             extraction = litellm.completion(
                 model="openai/llama-3.1-8b-instant",
                 api_key=api_key,
@@ -164,14 +230,12 @@ def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> Assist
             )
             oferta_laboral = extraction.choices[0].message.content.strip()
 
-            # 2. Instanciamos el modelo para CrewAI
             llm_groq = LLM(
                 model="openai/llama-3.1-8b-instant",  
                 base_url="https://api.groq.com/openai/v1", 
                 api_key=api_key
             )
 
-            # 3. Definición de los agentes
             reclutador = Agent(
                 role="Reclutador Técnico Senior",
                 goal="Analizar ofertas de empleo y extraer requisitos técnicos esenciales y palabras clave para filtros ATS.",
@@ -188,7 +252,6 @@ def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> Assist
                 llm=llm_groq
             )
 
-            # 4. Definición de las tareas
             tarea_analisis = Task(
                 description=f"Analiza detalladamente esta oferta de empleo e identifica los requisitos críticos:\n\n{oferta_laboral}",
                 expected_output="Un reporte ejecutivo con las palabras clave, tecnologías obligatorias y competencias clave deseadas.",
@@ -222,21 +285,23 @@ def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> Assist
                 response=f"Hubo un contratiempo al coordinar la Crew de agentes: {str(e)}"
             )
         
+    # --- 3. INTENCIÓN: CONTROL DOMÓTICO ---
     elif "DOMOTICS_CONTROL" in user_intent:
         return AssistantResponse(
             intent="DOMOTICS_CONTROL",
             response="Entendido, Alexis. Conectando con los sistemas de domótica... (Módulo IoT en desarrollo)."
         )
         
+    # --- 4. INTENCIÓN: BÚSQUEDA WEB GENERAL ---
     elif "WEB_SEARCH" in user_intent:
         query_optima = optimizar_query_busqueda(message, api_key)
         contexto_web = buscar_en_internet(query_optima)
         
         prompt_final = (
             f"Eres AI Alexis, un asistente de inteligencia artificial leal y brillante inspirado en J.A.R.V.I.S.\n"
-            f"Responde detalladamente a la solicitud del usuario utilizando como única fuente de verdad la información extraída de internet.\n"
-            f"Sé preciso, directo y amigable. Nota: Estamos en el año 2026.\n\n"
-            f"Resultados de búsqueda en tiempo real para '{query_optima}':\n{contexto_web}\n\n"
+            f"Sintetiza la información relevante para responder al usuario directamente.\n"
+            f"REGLAS: Sé preciso, directo y profesional. NUNCA le pidas al usuario que navegue en la web por su cuenta.\n\n"
+            f"Resultados de búsqueda:\n{contexto_web}\n\n"
             f"Mensaje original del usuario: {message}"
         )
         
@@ -251,6 +316,7 @@ def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> Assist
             response=chat_response.choices[0].message.content
         )
         
+    # --- 5. INTENCIÓN: CHARLA GENERAL ---
     else:
         chat_response = litellm.completion(
             model="openai/llama-3.1-8b-instant",
@@ -268,10 +334,9 @@ def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> Assist
 
 
 # --- ENDPOINTS ---
-from app.schemas.assistant import AssistantRequest
 
 @router.post("/chat", response_model=AssistantResponse)
-def handle_assistant_chat(payload: AssistantRequest):
+async def handle_assistant_chat(payload: AssistantRequest):
     api_key = payload.groq_api_key or os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
@@ -284,10 +349,9 @@ def handle_assistant_chat(payload: AssistantRequest):
     if db_profile and "cv_text" in db_profile:
         cv_a_procesar = db_profile["cv_text"]
     else:
-        # Fallback si no hay registro aún
         cv_a_procesar = payload.cv_text or BASE_CV
         
-    return procesar_mensaje_alexis(payload.message, cv_a_procesar, api_key)
+    return await procesar_mensaje_alexis(payload.message, cv_a_procesar, api_key)
 
 
 @router.post("/voice", response_model=AssistantResponse)
@@ -330,7 +394,7 @@ async def handle_assistant_voice(
         else:
             cv_a_procesar = cv_text or BASE_CV
 
-        resultado = procesar_mensaje_alexis(texto_transcrito, cv_a_procesar, api_key)
+        resultado = await procesar_mensaje_alexis(texto_transcrito, cv_a_procesar, api_key)
         resultado.response = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
         return resultado
 
@@ -340,11 +404,10 @@ async def handle_assistant_voice(
         raise HTTPException(status_code=500, detail=f"Error al procesar la nota de voz: {str(e)}")
 
 
-# 🌟 ENDPOINT MEJORADO: SUBIDA, EXTRACCIÓN Y GUARDADO EN ATLAS 🌟
 @router.post("/upload-cv")
 async def handle_upload_cv(
     file: UploadFile = File(...),
-    user_id: str = Form("alexis_perez_123")  # ID predeterminado para pruebas
+    user_id: str = Form("alexis_perez_123")
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Formato de archivo inválido. Sube un documento PDF.")
@@ -356,21 +419,21 @@ async def handle_upload_cv(
         if not texto_extraido:
             raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
         
-        # 💾 ¡Guardamos o Actualizamos en MongoDB Atlas en tiempo real!
+        # 💾 Guardamos o Actualizamos en MongoDB Atlas
         profiles_collection.update_one(
             {"_id": user_id},
             {"$set": {
                 "filename": file.filename,
                 "cv_text": texto_extraido
             }},
-            upsert=True  # Si el usuario no existe, lo crea automáticamente (upsert)
+            upsert=True
         )
         
         return {
             "user_id": user_id,
             "filename": file.filename,
             "status": "success_saved_to_atlas",
-            "extracted_text_preview": texto_extraido[:200] + "..."  # Una vista previa
+            "extracted_text_preview": texto_extraido[:200] + "..."
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar y guardar: {str(e)}")

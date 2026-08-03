@@ -1,2 +1,2 @@
 Iniciar backend(http://localhost:8000/docs):
-     uvicorn app.main:app --reload.
+     uvicorn app.main:app --reload
