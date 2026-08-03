@@ -125,21 +125,40 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
         return mensaje_usuario
 
 
-# --- EJECUTOR DE BÚSQUEDAS EN TIEMPO REAL ---
+# --- EJECUTOR DE BÚSQUEDAS EN TIEMPO REAL (TAVILY API + FALLBACK) ---
 def buscar_en_internet(query: str) -> str:
+    tavily_key = os.getenv("TAVILY_API_KEY")
+    
+    # 1. Intento con Tavily API (Buscador profesional para IA)
+    if tavily_key:
+        try:
+            tavily = TavilyClient(api_key=tavily_key)
+            response = tavily.search(query=query, search_depth="basic", max_results=3)
+            resultados = response.get("results", [])
+            
+            if resultados:
+                contexto = ""
+                for i, r in enumerate(resultados, 1):
+                    contexto += f"[{i}] Fuente: {r.get('title')}\nInformación: {r.get('content')}\n\n"
+                return contexto
+        except Exception as e:
+            print(f"⚠️ Error en Tavily API: {e}")
+
+    # 2. Fallback con DuckDuckGo por si no hay Key o falla Tavily
     try:
         with DDGS() as ddgs:
             resultados = list(ddgs.text(query, max_results=3))
-            if not resultados:
-                return "No se encontraron resultados relevantes."
-            contexto = ""
-            for i, r in enumerate(resultados, 1):
-                titulo = r.get("title", "Sin título")
-                cuerpo = r.get("body", r.get("snippet", "Sin descripción"))
-                contexto += f"[{i}] Fuente: {titulo}\nInformación: {cuerpo}\n\n"
-            return contexto
+            if resultados:
+                contexto = ""
+                for i, r in enumerate(resultados, 1):
+                    titulo = r.get("title", "Sin título")
+                    cuerpo = r.get("body", r.get("snippet", ""))
+                    contexto += f"[{i}] Fuente: {titulo}\nInformación: {cuerpo}\n\n"
+                return contexto
     except Exception as e:
-        return f"Error de conexión con el motor de búsqueda: {str(e)}"
+        print(f"⚠️ Error en DuckDuckGo: {e}")
+
+    return "No se encontraron resultados actualizados en la web."
 
 
 # --- PROCESADOR CENTRAL DE INTENCIONES (ASÍNCRONO CON CLIMA Y MONGO) ---
@@ -318,11 +337,17 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
         contexto_web = buscar_en_internet(query_optima)
         
         prompt_final = (
-            f"Eres AI Alexis, un asistente de inteligencia artificial leal y brillante inspirado en J.A.R.V.I.S.\n"
-            f"Sintetiza la información relevante para responder al usuario directamente.\n"
-            f"REGLAS: Sé preciso, directo y profesional. NUNCA le pidas al usuario que navegue en la web por su cuenta.\n\n"
-            f"Resultados de búsqueda:\n{contexto_web}\n\n"
-            f"Mensaje original del usuario: {message}"
+            f"Eres AI Alexis, un asistente de inteligencia artificial leal, directo e inteligente (inspirado en J.A.R.V.I.S.).\n"
+            f"FECHA ACTUAL DEL SISTEMA: Año 2026.\n\n"
+            f"Usa la siguiente información extraída de internet para responder a la pregunta del usuario.\n"
+            f"REGLAS:\n"
+            f"1. Responde de forma clara, directa y precisa basándote en los datos web.\n"
+            f"2. NUNCA digas que no tienes información si los datos web la contienen.\n"
+            f"3. NUNCA le pidas al usuario que navegue en la web por su cuenta ni incluyas URLs o corchetes de fuentes [1].\n\n"
+            f"--- INFORMACIÓN RECUPERADA DE INTERNET ---\n"
+            f"{contexto_web}\n"
+            f"------------------------------------------\n\n"
+            f"Consulta del usuario: {message}"
         )
         
         chat_response = litellm.completion(
