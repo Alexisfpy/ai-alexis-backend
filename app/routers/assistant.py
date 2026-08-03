@@ -143,7 +143,7 @@ def buscar_en_internet(query: str) -> str:
 
 
 # --- PROCESADOR CENTRAL DE INTENCIONES (ASÍNCRONO CON CLIMA Y MONGO) ---
-async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> AssistantResponse:
+async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, user_id: str = "guest_user") -> AssistantResponse:
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
@@ -336,16 +336,27 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> 
             response=chat_response.choices[0].message.content
         )
         
-    # --- 5. INTENCIÓN: CHARLA GENERAL ---
+    # --- 5. INTENCIÓN: CHARLA GENERAL (CON MEMORIA CONVERSACIONAL) ---
     else:
+        # Recuperamos los últimos 6 mensajes guardados en Atlas para dar contexto
+        historial_previo = []
+        doc = history_collection.find_one({"_id": user_id})
+        if doc and "messages" in doc:
+            for m in doc["messages"][-6:]:
+                historial_previo.append({"role": m["role"], "content": m["content"]})
+
+        prompt_sistema = {
+            "role": "system",
+            "content": f"Eres AI Alexis, un asistente de IA leal, altamente inteligente y con un toque de ingenio técnico, inspirado en J.A.R.V.I.S. Estás hablando con el usuario registrado con ID: {user_id}. Responde siempre de forma clara, directa y en español."
+        }
+        
+        mensajes_para_llm = [prompt_sistema] + historial_previo + [{"role": "user", "content": message}]
+
         chat_response = litellm.completion(
             model="openai/llama-3.1-8b-instant",
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
-            messages=[
-                {"role": "system", "content": "Eres AI Alexis, un asistente de IA leal, altamente inteligente y con un toque de ingenio técnico, inspirado en J.A.R.V.I.S. Responde siempre de forma clara, directa y en español."},
-                {"role": "user", "content": message}
-            ]
+            messages=mensajes_para_llm
         )
         return AssistantResponse(
             intent="GENERAL_CHAT",
@@ -355,7 +366,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> 
 
 # --- ENDPOINTS ---
 
-# 📜 NUEVO ENDPOINT: RECUPERAR HISTORIAL DE CHAT DESDE MONGO ATLAS
+# 📜 RECUPERAR HISTORIAL DE CHAT DESDE MONGO ATLAS
 @router.get("/history/{user_id}")
 async def get_user_chat_history(user_id: str):
     try:
@@ -383,7 +394,7 @@ async def handle_assistant_chat(payload: AssistantRequest):
     else:
         cv_a_procesar = payload.cv_text or BASE_CV
         
-    resultado = await procesar_mensaje_alexis(payload.message, cv_a_procesar, api_key)
+    resultado = await procesar_mensaje_alexis(payload.message, cv_a_procesar, api_key, user_id)
 
     # 💾 Guardamos la interacción en MongoDB Atlas automáticamente
     guardar_en_historial(user_id, payload.message, resultado.response, resultado.intent)
@@ -431,7 +442,7 @@ async def handle_assistant_voice(
         else:
             cv_a_procesar = cv_text or BASE_CV
 
-        resultado = await procesar_mensaje_alexis(texto_transcrito, cv_a_procesar, api_key)
+        resultado = await procesar_mensaje_alexis(texto_transcrito, cv_a_procesar, api_key, user_id)
         respuesta_formateada = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
         
         # 💾 Guardamos también las notas de voz en el historial de Atlas
