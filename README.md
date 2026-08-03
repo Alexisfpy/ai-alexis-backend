@@ -136,3 +136,12 @@ NEXT_PUBLIC_API_URL=[https://ai-alexis-backend.onrender.com/api/v1](https://ai-a
 
 1. **Backend (Web Service):** Conectar repositorio GitHub en Render, configurar entorno Python 3.11+, comando de inicio `uvicorn app.main:app --host 0.0.0.0 --port $PORT` y añadir variables `GROQ_API_KEY` y `MONGODB_URI`.
 2. **Frontend (Web Service / Static Site):** Conectar repositorio de Next.js, añadir variables `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` y `NEXT_PUBLIC_API_URL`.
+
+## Resumen: 🏆 Arquitectura en Producción
+- 🔐 Autenticación: Clerk (Google / Email).
+- 🧠 Memoria Persistente: MongoDB Atlas Cloud (historial e identidad por user_id).
+- ⚡ Inferencia de Alto Rendimiento: Groq (Llama 3.1 8B Instant).
+- 🌐 Búsqueda Web en Tiempo Real: Tavily Search API.
+- 🎙️ Transcripción de Voz: Whisper Large v3.
+- 🤖 Agentes Autónomos: CrewAI para optimización de CVs.
+- 🌤️ Servicio Meteorológico: Open-Meteo API.
