@@ -30,6 +30,28 @@ if not MONGODB_URI:
 client = MongoClient(MONGODB_URI)
 db = client["ai_alexis_db"]
 profiles_collection = db["profiles"]
+history_collection = db["chat_history"]  # 💾 COLECCIÓN PARA HISTORIAL DE CONVERSACIONES
+
+
+# --- HELPER: GUARDAR MENSAJES EN MONGO ATLAS ---
+def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent: str):
+    try:
+        history_collection.update_one(
+            {"_id": user_id},
+            {
+                "$push": {
+                    "messages": {
+                        "$each": [
+                            {"role": "user", "content": user_text},
+                            {"role": "assistant", "content": bot_response, "intent": intent}
+                        ]
+                    }
+                }
+            },
+            upsert=True
+        )
+    except Exception as e:
+        print(f"⚠️ Error guardando historial en Atlas: {e}")
 
 
 # --- PERFIL PROFESIONAL BASE DE ALEXIS (Respaldo por si Atlas está vacío) ---
@@ -153,7 +175,6 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> 
     # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA (OPEN-METEO) ---
     if "WEATHER" in user_intent:
         try:
-            # Extraer la ubicación de forma limpia
             prompt_ubicacion = (
                 "Extrae ÚNICAMENTE el nombre de la ciudad, isla o municipio mencionado en el mensaje del usuario.\n"
                 "Ejemplo: 'Dime los grados de temperatura para mañana en Fuerteventura' -> 'Fuerteventura'\n"
@@ -173,7 +194,6 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> 
             )
             ubicacion = res_loc.choices[0].message.content.strip().replace('"', '').replace("'", "")
             
-            # Consultar servicio Open-Meteo
             datos_clima = await obtener_clima_open_meteo(ubicacion)
 
             if datos_clima:
@@ -335,13 +355,25 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str) -> 
 
 # --- ENDPOINTS ---
 
+# 📜 NUEVO ENDPOINT: RECUPERAR HISTORIAL DE CHAT DESDE MONGO ATLAS
+@router.get("/history/{user_id}")
+async def get_user_chat_history(user_id: str):
+    try:
+        doc = history_collection.find_one({"_id": user_id})
+        if doc and "messages" in doc:
+            return {"messages": doc["messages"]}
+        return {"messages": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al recuperar historial: {str(e)}")
+
+
 @router.post("/chat", response_model=AssistantResponse)
 async def handle_assistant_chat(payload: AssistantRequest):
     api_key = payload.groq_api_key or os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
     
-    user_id = payload.user_id or "alexis_perez_123"
+    user_id = payload.user_id or "guest_user"
     
     # 🔍 Buscamos en MongoDB Atlas si existe el perfil del usuario
     db_profile = profiles_collection.find_one({"_id": user_id})
@@ -351,14 +383,19 @@ async def handle_assistant_chat(payload: AssistantRequest):
     else:
         cv_a_procesar = payload.cv_text or BASE_CV
         
-    return await procesar_mensaje_alexis(payload.message, cv_a_procesar, api_key)
+    resultado = await procesar_mensaje_alexis(payload.message, cv_a_procesar, api_key)
+
+    # 💾 Guardamos la interacción en MongoDB Atlas automáticamente
+    guardar_en_historial(user_id, payload.message, resultado.response, resultado.intent)
+
+    return resultado
 
 
 @router.post("/voice", response_model=AssistantResponse)
 async def handle_assistant_voice(
     file: UploadFile = File(...), 
     groq_api_key: str = Form(None),
-    user_id: str = Form("alexis_perez_123"),
+    user_id: str = Form("guest_user"),
     cv_text: str = Form("")
 ):
     api_key = groq_api_key or os.getenv("GROQ_API_KEY")
@@ -395,7 +432,12 @@ async def handle_assistant_voice(
             cv_a_procesar = cv_text or BASE_CV
 
         resultado = await procesar_mensaje_alexis(texto_transcrito, cv_a_procesar, api_key)
-        resultado.response = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
+        respuesta_formateada = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
+        
+        # 💾 Guardamos también las notas de voz en el historial de Atlas
+        guardar_en_historial(user_id, f"🎙️ [Nota de voz]: {texto_transcrito}", resultado.response, resultado.intent)
+
+        resultado.response = respuesta_formateada
         return resultado
 
     except Exception as e:
@@ -407,7 +449,7 @@ async def handle_assistant_voice(
 @router.post("/upload-cv")
 async def handle_upload_cv(
     file: UploadFile = File(...),
-    user_id: str = Form("alexis_perez_123")
+    user_id: str = Form("guest_user")
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Formato de archivo inválido. Sube un documento PDF.")
@@ -419,7 +461,7 @@ async def handle_upload_cv(
         if not texto_extraido:
             raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
         
-        # 💾 Guardamos o Actualizamos en MongoDB Atlas
+        # 💾 Guardamos o Actualizamos en MongoDB Atlas en tiempo real asociando al userId de Clerk
         profiles_collection.update_one(
             {"_id": user_id},
             {"$set": {
