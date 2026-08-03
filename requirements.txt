@@ -3143,4 +3143,4 @@ zstandard==0.25.0 \
     # via langsmith
 
 # Tavily 
-tavily-python>=0.5.0
+tavily-python==0.7.27
