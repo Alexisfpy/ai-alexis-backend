@@ -338,16 +338,26 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
         
     # --- 5. INTENCIÓN: CHARLA GENERAL (CON MEMORIA CONVERSACIONAL) ---
     else:
-        # Recuperamos los últimos 6 mensajes guardados en Atlas para dar contexto
+        # Recuperamos los últimos 6 mensajes guardados en Atlas
         historial_previo = []
         doc = history_collection.find_one({"_id": user_id})
         if doc and "messages" in doc:
             for m in doc["messages"][-6:]:
                 historial_previo.append({"role": m["role"], "content": m["content"]})
 
+        # Extraemos información de tu perfil/CV guardado en Atlas
+        contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil registrado."
+
         prompt_sistema = {
             "role": "system",
-            "content": f"Eres AI Alexis, un asistente de IA leal, altamente inteligente y con un toque de ingenio técnico, inspirado en J.A.R.V.I.S. Estás hablando con el usuario registrado con ID: {user_id}. Responde siempre de forma clara, directa y en español."
+            "content": (
+                f"Eres AI Alexis, un asistente de IA leal, altamente inteligente y con un toque de ingenio técnico, inspirado en J.A.R.V.I.S.\n"
+                f"Estás hablando con el usuario registrado (ID de sesión: {user_id}).\n"
+                f"--- DATOS DEL PERFIL DEL USUARIO ---\n"
+                f"{contexto_perfil}\n"
+                f"------------------------------------\n\n"
+                f"REGLA: Usa esta información para saber exactamente con quién hablas cuando te pregunte por su identidad o perfil. Responde siempre de forma clara, directa y en español."
+            )
         }
         
         mensajes_para_llm = [prompt_sistema] + historial_previo + [{"role": "user", "content": message}]
