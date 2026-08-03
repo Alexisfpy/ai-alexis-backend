@@ -3,7 +3,7 @@ import io
 import litellm
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from app.schemas.assistant import AssistantRequest, AssistantResponse
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from crewai import Agent, Task, Crew, Process, LLM
 from pypdf import PdfReader
 from pymongo import MongoClient  # Driver de MongoDB
