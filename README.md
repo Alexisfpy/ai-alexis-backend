@@ -1,56 +1,138 @@
-# 🤖 AI Alexis Backend - Motor SaaS Multiusuario (J.A.R.V.I.S. Inspired)
+# 🤖 AI Alexis - Asistente Virtual Inteligente Multimodal
 
-Este repositorio contiene el núcleo del backend de **AI Alexis**, un asistente inteligente avanzado inspirado en la filosofía de J.A.R.V.I.S. Diseñado bajo una arquitectura ágil, desacoplada y multicliente (SaaS), el sistema es capaz de clasificar intenciones en tiempo real, ejecutar búsquedas dinámicas en internet, procesar notas de voz y optimizar currículums de forma personalizada utilizando un sistema multiagente.
-
----
-
-## 🚀 Características Principales & Roadmap Completado
-
-### 📍 Fase 1: Modularización Dinámica (Inyección de Perfil)
-- Se ha eliminado la dependencia de perfiles cableados en código (`hardcoded`).
-- El enrutador central se ha desacoplado por completo de la lógica de negocio mediante inversión de control, permitiendo inyectar el ADN profesional (`cv_texto`) como un argumento dinámico en cada petición.
-
-### 📂 Fase 2: Pipeline de Ingestión (PDF a Texto)
-- Integración de un sistema de extracción binaria de archivos PDF utilizando la librería de alta eficiencia `pypdf`.
-- Endpoint de subida optimizado (`/upload-cv`) que convierte currículums en documentos de texto limpio estructurados en JSON en cuestión de milisegundos.
-
-### 💾 Fase 3: Capa de Persistencia Multiusuario (MongoDB Atlas Cloud)
-- Transición de un entorno local a un ecosistema multinivel en la nube utilizando **MongoDB Atlas**.
-- Implementación de un aislamiento de datos basado en identificadores únicos (`user_id`).
-- Sistema de guardado y actualización inteligente (`upsert`) en tiempo real. Cuando un usuario interactúa mediante chat o voz, la inteligencia artificial recupera automáticamente su CV específico de la base de datos cloud, aislando los datos entre diferentes clientes.
+**AI Alexis** es un ecosistema de asistencia virtual e inteligencia artificial multimodal de nueva generación, inspirado en sistemas avanzados como J.A.R.V.I.S. Permite interacción conversacional por texto y voz, consulta de información meteorológica y web en tiempo real, análisis y optimización automatizada de currículums mediante un equipo de agentes autónomos, autenticación multiusuario y memoria conversacional persistente en la nube.
 
 ---
 
-## 🛠️ Stack Tecnológico
+## 🚀 Características Principales
 
-- **Framework principal:** FastAPI (Python)
-- **Orquestación de Agentes de IA:** CrewAI (Multi-Agent System: Reclutador Técnico + Redactor de Carreras)
-- **Abstracción de LLMs & Audio:** LiteLLM (Integración con Groq Cloud: Llama 3.1 & Whisper-large-v3)
-- **Base de Datos Cloud:** MongoDB Atlas (vía PyMongo)
-- **Procesamiento de Documentos:** PyPDF
-- **Gestor de Entorno:** Python-Dotenv & Pathlib para resolución absoluta de rutas.
-- **Package Manager:** `uv` de Astral
+* 🔐 **Autenticación Multiusuario y Control de Acceso (Clerk):**
+  * Inicio de sesión seguro mediante cuentas de Google u otros proveedores OAuth / Email.
+  * Gestión de tokens y sesiones protegidas con `@clerk/nextjs` y Middleware en Next.js.
+  * Aislamiento total de datos y perfiles por ID único de usuario (`userId`).
+
+* 🧠 **Memoria Conversacional Persistente (MongoDB Atlas Cloud):**
+  * Guardado automático de todas las interacciones (texto, voz e intenciones) en la nube.
+  * Recuperación dinámica del historial al iniciar sesión o recargar la pantalla desde cualquier dispositivo.
+  * Inyección del contexto histórico conversacional y del perfil del usuario en las respuestas de Llama 3.
+
+* 🎙️ **Procesamiento de Voz en Tiempo Real (Whisper Large v3):**
+  * Botón *Push-to-Talk* ("Mantener para hablar") integrado directamente en la interfaz.
+  * Transcripción de audio de alta precisión mediante `groq/whisper-large-v3`.
+  * Conversión automática de notas de voz a texto e integración con la memoria de la IA.
+
+* 📄 **Indexación y Optimización de CV con Agentes Autónomos (CrewAI):**
+  * Subida y extracción directa de documentos PDF.
+  * Almacenamiento permanente del texto del CV en la colección `profiles` de MongoDB Atlas.
+  * Orquestación de una **Crew de Agentes de IA** (*Reclutador Técnico Senior* + *Consultor y Redactor Técnico*) para adaptar el currículum del usuario según ofertas laborales específicas y filtros ATS.
+
+* 🌤️ **Servicio Meteorológico en Tiempo Real (Open-Meteo):**
+  * Detección automática de ubicaciones mediante LLM.
+  * Consulta directa a la API de Open-Meteo para obtener temperaturas (máxima y mínima) y probabilidad de precipitación sin depender de búsquedas web genéricas.
+
+* 🌐 **Búsqueda Web en Tiempo Real (DuckDuckGo + Optimización LLM):**
+  * Clasificador inteligente de intenciones (`WEATHER`, `CV_OPTIMIZATION`, `DOMOTICS_CONTROL`, `WEB_SEARCH`, `GENERAL_CHAT`).
+  * Optimizador de consultas para transformar lenguaje natural en palabras clave eficientes de búsqueda.
+  * Extracción y síntesis de resultados actualizados.
 
 ---
 
-## 🚦 Endpoints del Asistente (`/assistant`)
+## 🛠️ Tecnologías Utilizadas
 
-El backend expone una interfaz API documentada en Swagger bajo la ruta raíz `/docs`:
+### **Frontend**
+* **Framework:** Next.js (React / App Router).
+* **Autenticación:** Clerk (`@clerk/nextjs`).
+* **Estilos:** Tailwind CSS con tema oscuro (*Dark Mode*).
+* **Audio:** MediaRecorder API (grabación WebM).
 
-1. **`POST /assistant/upload-cv`**: Recibe un archivo binario `.pdf` y un `user_id` (vía Form-Data). Extrae el texto y lo almacena de forma persistente en MongoDB Atlas.
-2. **`POST /assistant/chat`**: Recibe el mensaje del usuario y su `user_id`. Clasifica la intención y, si requiere optimización, consulta Atlas para inyectar dinámicamente el currículum del cliente en la CrewAI de agentes.
-3. **`POST /assistant/voice`**: Recibe un archivo de audio, lo transcribe con Whisper en tiempo real y ejecuta el flujo inteligente inyectando la persistencia cloud del usuario.
+### **Backend**
+* **Framework:** FastAPI (Python).
+* **Modelos LLM:** Groq / LiteLLM (`llama-3.1-8b-instant`, `groq/whisper-large-v3`).
+* **Orquestación Multi-Agente:** CrewAI.
+* **Base de Datos:** MongoDB Atlas Cloud (PyMongo).
+* **Búsquedas & Clima:** Open-Meteo API, DuckDuckGo Search (`ddgs`).
+
+### **Infraestructura & Cloud**
+* **Hosting App & API:** Render Cloud Platform.
+* **Base de Datos en la Nube:** MongoDB Atlas.
+* **Control de Versiones:** Git & GitHub.
 
 ---
 
-## ⚙️ Configuración del Entorno (`.env`)
+## 📁 Estructura del Proyecto
 
-Para correr este proyecto, es necesario crear un archivo `.env` en la raíz del backend con la siguiente estructura:
-
-```env
-# Claves de las APIs de Inteligencia Artificial
-GROQ_API_KEY="tu_api_key_de_groq_aqui"
-
-# Cadena de conexión segura de MongoDB Atlas (Cloud)
-MONGODB_URI="mongodb+srv://<usuario>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+```text
+ai-alexis/
+├── ai-alexis-backend/               # Servidor FastAPI
+│   ├── app/
+│   │   ├── routers/
+│   │   │   └── assistant.py         # Endpoints principal, chat, voz, CV e historial
+│   │   ├── schemas/
+│   │   │   └── assistant.py         # Esquemas Pydantic
+│   │   ├── services/
+│   │   │   └── weather_service.py   # Integración con Open-Meteo API
+│   │   └── main.py                  # Punto de entrada de FastAPI
+│   ├── .env                         # Variables de entorno del backend
+│   └── requirements.txt             # Dependencias de Python
+│
+└── ai-alexis-frontend/              # Aplicación Next.js
+    ├── src/
+    │   ├── app/
+    │   │   ├── layout.js            # Provider de Clerk y fuentes
+    │   │   └── page.js              # Interfaz del chat, voz y subida de archivos
+    │   └── middleware.js            # Interceptor de seguridad Clerk
+    ├── .env.local                   # Variables de entorno del frontend
+    └── package.json
 ```
+
+---
+
+## ⚙️ Variables de Entorno
+
+### **Backend (`.env`)**
+```ini
+GROQ_API_KEY=tu_api_key_de_groq
+MONGODB_URI=mongodb+srv://<usuario>:<password>@cluster0.mongodb.net/?retryWrites=true&w=majority
+```
+
+### **Frontend (`.env.local`)**
+```ini
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
+CLERK_SECRET_KEY=sk_test_...
+NEXT_PUBLIC_API_URL=[https://ai-alexis-backend.onrender.com/api/v1](https://ai-alexis-backend.onrender.com/api/v1)
+```
+
+---
+
+## 📌 Endpoints Principales de la API
+
+| Método | Ruta | Descripción |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/assistant/chat` | Procesa mensajes de texto e interactúa con el LLM. |
+| `POST` | `/api/v1/assistant/voice` | Recibe audio WebM, transcribe con Whisper y responde. |
+| `POST` | `/api/v1/assistant/upload-cv` | Extrae y guarda el PDF del CV asociado al usuario en MongoDB Atlas. |
+| `GET`  | `/api/v1/assistant/history/{user_id}` | Obtiene el historial de mensajes de un usuario desde MongoDB Atlas. |
+
+---
+
+## 💻 Ejecución en Desarrollo Local
+
+1. **Iniciar Backend:**
+   ```bash
+   cd ai-alexis-backend
+   uvicorn app.main:app --reload
+   ```
+
+2. **Iniciar Frontend:**
+   ```bash
+   cd ai-alexis-frontend
+   npm run dev
+   ```
+   Abre [http://localhost:3000](http://localhost:3000) en el navegador.
+
+---
+
+## ☁️ Despliegue en Producción (Render)
+
+1. **Backend (Web Service):** Conectar repositorio GitHub en Render, configurar entorno Python 3.11+, comando de inicio `uvicorn app.main:app --host 0.0.0.0 --port $PORT` y añadir variables `GROQ_API_KEY` y `MONGODB_URI`.
+2. **Frontend (Web Service / Static Site):** Conectar repositorio de Next.js, añadir variables `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY` y `NEXT_PUBLIC_API_URL`.
