@@ -4,6 +4,7 @@ from typing import Optional, List, Dict
 class ChatMessage(BaseModel):
     role: str  # "user" o "assistant"
     content: str
+    image: Optional[str] = None  # Cadena Base64 opcional
 
 class AssistantRequest(BaseModel):
     message: str
@@ -11,6 +12,7 @@ class AssistantRequest(BaseModel):
     groq_api_key: Optional[str] = None
     user_id: Optional[str] = "alexis_perez_123"
     cv_text: Optional[str] = "" # Añadido campo para la transición
+    image: Optional[str] = None  # Imagen en formato Base64 enviada desde el frontend
 class AssistantResponse(BaseModel):
     intent: str
     response: str

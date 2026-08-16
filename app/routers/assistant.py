@@ -1,22 +1,25 @@
 import os
 import io
 import litellm
+from litellm import completion
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from app.schemas.assistant import AssistantRequest, AssistantResponse
 from duckduckgo_search import DDGS
 from crewai import Agent, Task, Crew, Process, LLM
 from pypdf import PdfReader
-from pymongo import MongoClient  # Driver de MongoDB
+from pymongo import MongoClient
 from dotenv import load_dotenv
 from pathlib import Path
-from app.services.weather_service import obtener_clima_open_meteo # Servicio de Clima Open-Meteo
-from tavily import TavilyClient # Mejora buscador 
+from app.services.weather_service import obtener_clima_open_meteo
+from tavily import TavilyClient
 
-# FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env (subiendo desde app/routers/ hasta la raíz)
+# --- CONFIGURACIÓN DE MODELOS ---
+TEXT_MODEL = "openai/llama-3.1-8b-instant"
+VISION_MODEL = "groq/llama-3.2-11b-vision-preview"
+
+# FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
 ruta_env = ruta_raiz / ".env"
-
-# Cargamos el archivo apuntando directamente a su ubicación real
 load_dotenv(dotenv_path=ruta_env)
 
 router = APIRouter(prefix="/assistant", tags=["AI Alexis Assistant"])
@@ -25,13 +28,12 @@ router = APIRouter(prefix="/assistant", tags=["AI Alexis Assistant"])
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
     print("❌ ERROR CRÍTICO: MONGODB_URI no se está leyendo del archivo .env")
-    print(f"👉 Busqué el archivo en la ruta física: {ruta_env}")
     MONGODB_URI = "mongodb://localhost:27017"
 
 client = MongoClient(MONGODB_URI)
 db = client["ai_alexis_db"]
 profiles_collection = db["profiles"]
-history_collection = db["chat_history"]  # 💾 COLECCIÓN PARA HISTORIAL DE CONVERSACIONES
+history_collection = db["chat_history"]
 
 
 # --- HELPER: GUARDAR MENSAJES EN MONGO ATLAS ---
@@ -55,33 +57,12 @@ def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent
         print(f"⚠️ Error guardando historial en Atlas: {e}")
 
 
-# --- PERFIL PROFESIONAL BASE DE ALEXIS (Respaldo por si Atlas está vacío) ---
+# --- PERFIL PROFESIONAL BASE ---
 BASE_CV = """
 Nombre Completo: Alexis Fernando Pérez Yamasque
 Ubicación: Vigo, Galicia
 Perfil Profesional: 
-Ingeniero de IA y Estudiante de Big Data con sólida formación en desarrollo multiplataforma y administración de sistemas. Especializado en el diseño, entrenamiento y despliegue de modelos de Machine Learning y Deep Learning, así como en la estructuración de flujos de datos a gran escala.
-
-Experiencia Laboral:
-- Programador Técnico Industrial en ESYCONTROL (Mayo 2022 – Septiembre 2023).
-  Desarrollo de aplicaciones de extremo a extremo (.NET), gestión de lógica de negocio en backend y administración de bases de datos.
-
-Educación y Certificaciones:
-- Especialidad en Inteligencia Artificial y Big Data (En curso, 2026).
-- Curso FUNDAE Nivel 6: Backend Avanzado (Completado en Enero 2025).
-- Técnico Superior en Desarrollo de Aplicaciones Multiplataforma (DAM) - Colegio Vivas (2020 – 2022).
-- Técnico Superior en Administración de Sistemas Informáticos en Red (ASIR) - Daniel Castelao (2018 – 2020).
-
-Habilidades Técnicas:
-- IA & Machine Learning: Python, PyTorch, Keras, TensorFlow, scikit-learn.
-- Big Data: Apache Spark, Hadoop, HDFS, Hive, Sqoop, PySpark.
-- Desarrollo & Backend: .NET, Python, desarrollo de APIs robustas.
-- IoT & Domótica: Configuración de sensores Zigbee, despliegue de brokers MQTT, automatización de dispositivos.
-- Herramientas: Control de versiones con GitHub, gestión de dependencias con 'uv' package manager.
-
-Idiomas:
-- Español (Nativo)
-- Gallego (Competencia profesional)
+Ingeniero de IA y Estudiante de Big Data con sólida formación en desarrollo multiplataforma y administración de sistemas. Especializado en el diseño, entrenamiento y despliegue de modelos de Machine Learning y Deep Learning.
 """
 
 
@@ -111,7 +92,7 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
         )
         
         response = litellm.completion(
-            model="openai/llama-3.1-8b-instant",
+            model=TEXT_MODEL,
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
             messages=[
@@ -126,11 +107,10 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
         return mensaje_usuario
 
 
-# --- EJECUTOR DE BÚSQUEDAS EN TIEMPO REAL (TAVILY API + FALLBACK) ---
+# --- EJECUTOR DE BÚSQUEDAS EN TIEMPO REAL ---
 def buscar_en_internet(query: str) -> str:
     tavily_key = os.getenv("TAVILY_API_KEY")
     
-    # 1. Intento con Tavily API (Buscador profesional para IA)
     if tavily_key:
         try:
             tavily = TavilyClient(api_key=tavily_key)
@@ -145,7 +125,6 @@ def buscar_en_internet(query: str) -> str:
         except Exception as e:
             print(f"⚠️ Error en Tavily API: {e}")
 
-    # 2. Fallback con DuckDuckGo por si no hay Key o falla Tavily
     try:
         with DDGS() as ddgs:
             resultados = list(ddgs.text(query, max_results=3))
@@ -162,11 +141,59 @@ def buscar_en_internet(query: str) -> str:
     return "No se encontraron resultados actualizados en la web."
 
 
-# --- PROCESADOR CENTRAL DE INTENCIONES (ASÍNCRONO CON CLIMA Y MONGO) ---
-async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, user_id: str = "guest_user") -> AssistantResponse:
+# --- PROCESADOR CENTRAL DE INTENCIONES ---
+async def procesar_mensaje_alexis(
+    message: str, 
+    cv_texto: str, 
+    api_key: str, 
+    user_id: str = "guest_user",
+    image_base64: str = None
+) -> AssistantResponse:
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
+    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (SI HAY IMAGEN) ---
+    if image_base64:
+        try:
+            texto_usuario = message.strip() if message and message.strip() else "Analiza y describe esta imagen en detalle."
+            mensajes_vision = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Eres AI Alexis, un asistente virtual de IA avanzado con capacidades de visión por computador. "
+                        "Analiza detalladamente la imagen proporcionada, responde a la petición del usuario de forma técnica, "
+                        "precisa y elegante en español."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": texto_usuario},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                        }
+                    ]
+                }
+            ]
+
+            vision_response = litellm.completion(
+                model=VISION_MODEL,
+                api_key=api_key,
+                messages=mensajes_vision
+            )
+
+            return AssistantResponse(
+                intent="IMAGE_ANALYSIS",
+                response=vision_response.choices[0].message.content
+            )
+        except Exception as e:
+            return AssistantResponse(
+                intent="IMAGE_ANALYSIS",
+                response=f"Ocurrió un error al procesar la imagen con el modelo de visión: {str(e)}"
+            )
+
+    # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO ---
     system_prompt = (
         "Eres el clasificador de intenciones de AI Alexis.\n"
         "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
@@ -179,7 +206,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
     )
 
     classification = litellm.completion(
-        model="openai/llama-3.1-8b-instant",
+        model=TEXT_MODEL,
         api_key=api_key,
         base_url="https://api.groq.com/openai/v1",
         messages=[
@@ -192,7 +219,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
     user_intent = classification.choices[0].message.content.strip().upper()
     user_intent = user_intent.replace("'", "").replace('"', "").replace(".", "").strip()
 
-    # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA (OPEN-METEO) ---
+    # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA ---
     if "WEATHER" in user_intent:
         try:
             prompt_ubicacion = (
@@ -203,7 +230,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
                 "REGLA ESTRICTA: Responde SOLO con el nombre de la ubicación sin comillas ni signos."
             )
             res_loc = litellm.completion(
-                model="openai/llama-3.1-8b-instant",
+                model=TEXT_MODEL,
                 api_key=api_key,
                 base_url="https://api.groq.com/openai/v1",
                 messages=[
@@ -238,7 +265,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
             )
 
             chat_response = litellm.completion(
-                model="openai/llama-3.1-8b-instant",
+                model=TEXT_MODEL,
                 api_key=api_key,
                 base_url="https://api.groq.com/openai/v1",
                 messages=[{"role": "user", "content": prompt_respuesta_clima}]
@@ -259,7 +286,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
     elif "CV_OPTIMIZATION" in user_intent:
         try:
             extraction = litellm.completion(
-                model="openai/llama-3.1-8b-instant",
+                model=TEXT_MODEL,
                 api_key=api_key,
                 base_url="https://api.groq.com/openai/v1",
                 messages=[
@@ -271,7 +298,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
             oferta_laboral = extraction.choices[0].message.content.strip()
 
             llm_groq = LLM(
-                model="openai/llama-3.1-8b-instant",  
+                model=TEXT_MODEL,  
                 base_url="https://api.groq.com/openai/v1", 
                 api_key=api_key
             )
@@ -352,7 +379,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
         )
         
         chat_response = litellm.completion(
-            model="openai/llama-3.1-8b-instant",
+            model=TEXT_MODEL,
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
             messages=[{"role": "user", "content": prompt_final}]
@@ -362,16 +389,14 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
             response=chat_response.choices[0].message.content
         )
         
-    # --- 5. INTENCIÓN: CHARLA GENERAL (CON MEMORIA CONVERSACIONAL) ---
+    # --- 5. INTENCIÓN: CHARLA GENERAL ---
     else:
-        # Recuperamos los últimos 6 mensajes guardados en Atlas
         historial_previo = []
         doc = history_collection.find_one({"_id": user_id})
         if doc and "messages" in doc:
             for m in doc["messages"][-6:]:
                 historial_previo.append({"role": m["role"], "content": m["content"]})
 
-        # Extraemos información de tu perfil/CV guardado en Atlas
         contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil registrado."
 
         prompt_sistema = {
@@ -389,7 +414,7 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
         mensajes_para_llm = [prompt_sistema] + historial_previo + [{"role": "user", "content": message}]
 
         chat_response = litellm.completion(
-            model="openai/llama-3.1-8b-instant",
+            model=TEXT_MODEL,
             api_key=api_key,
             base_url="https://api.groq.com/openai/v1",
             messages=mensajes_para_llm
@@ -402,7 +427,6 @@ async def procesar_mensaje_alexis(message: str, cv_texto: str, api_key: str, use
 
 # --- ENDPOINTS ---
 
-# 📜 RECUPERAR HISTORIAL DE CHAT DESDE MONGO ATLAS
 @router.get("/history/{user_id}")
 async def get_user_chat_history(user_id: str):
     try:
@@ -422,18 +446,26 @@ async def handle_assistant_chat(payload: AssistantRequest):
     
     user_id = payload.user_id or "guest_user"
     
-    # 🔍 Buscamos en MongoDB Atlas si existe el perfil del usuario
     db_profile = profiles_collection.find_one({"_id": user_id})
-    
     if db_profile and "cv_text" in db_profile:
         cv_a_procesar = db_profile["cv_text"]
     else:
         cv_a_procesar = payload.cv_text or BASE_CV
         
-    resultado = await procesar_mensaje_alexis(payload.message, cv_a_procesar, api_key, user_id)
+    resultado = await procesar_mensaje_alexis(
+        message=payload.message, 
+        cv_texto=cv_a_procesar, 
+        api_key=api_key, 
+        user_id=user_id,
+        image_base64=payload.image
+    )
 
-    # 💾 Guardamos la interacción en MongoDB Atlas automáticamente
-    guardar_en_historial(user_id, payload.message, resultado.response, resultado.intent)
+    # Si se envió imagen, registramos la acción en el historial
+    texto_guardado = payload.message or "📸 [Imagen enviada]"
+    if payload.image and not payload.message:
+        texto_guardado = "📸 [Análisis de imagen]"
+
+    guardar_en_historial(user_id, texto_guardado, resultado.response, resultado.intent)
 
     return resultado
 
@@ -470,18 +502,20 @@ async def handle_assistant_voice(
         if not texto_transcrito:
             raise HTTPException(status_code=400, detail="No se pudo entender el audio.")
 
-        # 🔍 Buscamos en MongoDB Atlas para la inyección de voz
         db_profile = profiles_collection.find_one({"_id": user_id})
-        
         if db_profile and "cv_text" in db_profile:
             cv_a_procesar = db_profile["cv_text"]
         else:
             cv_a_procesar = cv_text or BASE_CV
 
-        resultado = await procesar_mensaje_alexis(texto_transcrito, cv_a_procesar, api_key, user_id)
+        resultado = await procesar_mensaje_alexis(
+            message=texto_transcrito, 
+            cv_texto=cv_a_procesar, 
+            api_key=api_key, 
+            user_id=user_id
+        )
         respuesta_formateada = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
         
-        # 💾 Guardamos también las notas de voz en el historial de Atlas
         guardar_en_historial(user_id, f"🎙️ [Nota de voz]: {texto_transcrito}", resultado.response, resultado.intent)
 
         resultado.response = respuesta_formateada
@@ -508,7 +542,6 @@ async def handle_upload_cv(
         if not texto_extraido:
             raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
         
-        # 💾 Guardamos o Actualizamos en MongoDB Atlas en tiempo real asociando al userId de Clerk
         profiles_collection.update_one(
             {"_id": user_id},
             {"$set": {
