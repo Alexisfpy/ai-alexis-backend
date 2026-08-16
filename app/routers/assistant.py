@@ -17,7 +17,7 @@ from app.services.rag_service import extract_text_from_pdf, index_document_conte
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/llama-3.3-70b-versatile"
-VISION_MODEL = "openai/qwen/qwen3.6-27b" # Modelo de vision estable
+VISION_MODEL = "openai/llama-3.2-11b-vision-preview" # Modelo de vision estable
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
