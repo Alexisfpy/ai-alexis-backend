@@ -6,15 +6,21 @@
 
 ## 🚀 Características Principales
 
+* 👁️ **Visión Multimodal y Análisis de Imágenes (`openai/qwen/qwen3.6-27b`):**
+  * Subida de imágenes y capturas directamente desde la interfaz (botón clip 📎).
+  * Conversión automática a Base64 y previsualización interactiva antes del envío.
+  * Análisis visual de alta precisión: OCR, lectura de tablas, esquemas, diagramas y descripción técnica de elementos visuales.
+  * Filtro por expresiones regulares para eliminar reflexiones internas (`<think>`) y renderizado Markdown limpio con `react-markdown`.
+
 * 🔐 **Autenticación Multiusuario y Control de Acceso (Clerk):**
   * Inicio de sesión seguro mediante cuentas de Google u otros proveedores OAuth / Email.
   * Gestión de tokens y sesiones protegidas con `@clerk/nextjs` y Middleware en Next.js.
   * Aislamiento total de datos y perfiles por ID único de usuario (`userId`).
 
 * 🧠 **Memoria Conversacional Persistente (MongoDB Atlas Cloud):**
-  * Guardado automático de todas las interacciones (texto, voz e intenciones) en la nube.
+  * Guardado automático de todas las interacciones (texto, imágenes, voz e intenciones) en la nube.
   * Recuperación dinámica del historial al iniciar sesión o recargar la pantalla desde cualquier dispositivo.
-  * Inyección del contexto histórico conversacional y del perfil del usuario en las respuestas de Llama 3.
+  * Inyección del contexto histórico conversacional y del perfil del usuario en las respuestas del asistente.
 
 * 🎙️ **Procesamiento de Voz en Tiempo Real (Whisper Large v3):**
   * Botón *Push-to-Talk* ("Mantener para hablar") integrado directamente en la interfaz.
@@ -31,7 +37,7 @@
   * Consulta directa a la API de Open-Meteo para obtener temperaturas (máxima y mínima) y probabilidad de precipitación sin depender de búsquedas web genéricas.
 
 * 🌐 **Búsqueda Web en Tiempo Real (Tavily Search API + Optimización LLM):**
-  * Clasificador inteligente de intenciones (`WEATHER`, `CV_OPTIMIZATION`, `DOMOTICS_CONTROL`, `WEB_SEARCH`, `GENERAL_CHAT`).
+  * Clasificador inteligente de intenciones (`IMAGE_ANALYSIS`, `WEATHER`, `CV_OPTIMIZATION`, `DOMOTICS_CONTROL`, `WEB_SEARCH`, `GENERAL_CHAT`).
   * Integración con **Tavily Search API** para la extracción directa y precisa de información en tiempo real sin bloqueos en la nube.
   * Optimizador de consultas para transformar lenguaje natural en palabras clave eficientes de búsqueda y síntesis de resultados actualizados.
 
@@ -41,13 +47,17 @@
 
 ### **Frontend**
 * **Framework:** Next.js (React / App Router).
+* **Renderizado de Contenido:** `react-markdown` (formato enriquecido con negritas, listas y bloques de código).
 * **Autenticación:** Clerk (`@clerk/nextjs`).
 * **Estilos:** Tailwind CSS con tema oscuro (*Dark Mode*).
-* **Audio:** MediaRecorder API (grabación WebM).
+* **Audio & Multimedia:** MediaRecorder API (grabación WebM) y FileReader API (procesamiento de imágenes en Base64).
 
 ### **Backend**
 * **Framework:** FastAPI (Python).
-* **Modelos LLM:** Groq / LiteLLM (`llama-3.1-8b-instant`, `groq/whisper-large-v3`).
+* **Modelos de Inferencia (Groq / LiteLLM):**
+  * **Texto, Clasificación y Chat:** `openai/gpt-oss-20b` (vía Groq API).
+  * **Visión Multimodal (OCR & Análisis de Imágenes):** `openai/qwen/qwen3.6-27b` (vía Groq API).
+  * **Voz a Texto:** `groq/whisper-large-v3`.
 * **Orquestación Multi-Agente:** CrewAI.
 * **Base de Datos:** MongoDB Atlas Cloud (PyMongo).
 * **Búsquedas & Clima:** Tavily Search API (`tavily-python`), Open-Meteo API, DuckDuckGo Search (`duckduckgo_search`).
@@ -66,9 +76,9 @@ ai-alexis/
 ├── ai-alexis-backend/               # Servidor FastAPI
 │   ├── app/
 │   │   ├── routers/
-│   │   │   └── assistant.py         # Endpoints principal, chat, voz, CV e historial
+│   │   │   └── assistant.py         # Endpoints principal, chat, visión, voz, CV e historial
 │   │   ├── schemas/
-│   │   │   └── assistant.py         # Esquemas Pydantic
+│   │   │   └── assistant.py         # Esquemas Pydantic (Request con soporte de imágenes y Response)
 │   │   ├── services/
 │   │   │   └── weather_service.py   # Integración con Open-Meteo API
 │   │   └── main.py                  # Punto de entrada de FastAPI
@@ -79,7 +89,7 @@ ai-alexis/
     ├── src/
     │   ├── app/
     │   │   ├── layout.js            # Provider de Clerk y fuentes
-    │   │   └── page.js              # Interfaz del chat, voz y subida de archivos
+    │   │   └── page.js              # Interfaz del chat, visión, voz y subida de archivos
     │   └── middleware.js            # Interceptor de seguridad Clerk
     ├── .env.local                   # Variables de entorno del frontend
     └── package.json
@@ -129,6 +139,7 @@ NEXT_PUBLIC_API_URL=[https://ai-alexis-backend.onrender.com/api/v1](https://ai-a
    cd ai-alexis-frontend
    npm run dev
    ```
+
    Abre [http://localhost:3000](http://localhost:3000) en el navegador.
 
 ---
@@ -144,7 +155,7 @@ NEXT_PUBLIC_API_URL=[https://ai-alexis-backend.onrender.com/api/v1](https://ai-a
 
 * 🔐 **Autenticación:** Clerk (Google / Email).
 * 🧠 **Memoria Persistente:** MongoDB Atlas Cloud (historial e identidad por `user_id`).
-* ⚡ **Inferencia de Alto Rendimiento:** Groq (`Llama 3.1 8B Instant`).
+* ⚡ **Inferencia de Alto Rendimiento:** Groq (`gpt-oss-20b`).
 * 🌐 **Búsqueda Web en Tiempo Real:** Tavily Search API.
 * 🎙️ **Transcripción de Voz:** Whisper Large v3.
 * 🤖 **Agentes Autónomos:** CrewAI para optimización de CVs.
