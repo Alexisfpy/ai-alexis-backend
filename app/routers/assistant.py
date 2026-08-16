@@ -14,11 +14,13 @@ from pathlib import Path
 from app.services.weather_service import obtener_clima_open_meteo
 from tavily import TavilyClient
 from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
-import google.generativeai as genai
+import base64
+from google import genai
+from google.genai import types
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/llama-3.3-70b-versatile" # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
-VISION_MODEL = "gemini-1.5-flash" # Google AI (Visión y análisis de imágenes)
+VISION_MODEL = "gemini-2.5-flash" # Google AI (Visión y análisis de imágenes)
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -156,7 +158,7 @@ async def procesar_mensaje_alexis(
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
-    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (GOOGLE GEMINI) ---
+    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (GOOGLE GENAI SDK) ---
     if image_base64:
         try:
             gemini_key = os.getenv("GEMINI_API_KEY")
@@ -166,8 +168,7 @@ async def procesar_mensaje_alexis(
                     response="⚠️ Falta configurar la variable GEMINI_API_KEY en el servidor."
                 )
 
-            genai.configure(api_key=gemini_key)
-            modelo_vision = genai.GenerativeModel(VISION_MODEL)
+            client = genai.Client(api_key=gemini_key)
 
             texto_usuario = message.strip() if message and message.strip() else "Analiza y describe esta imagen en detalle."
             prompt_vision = (
@@ -176,17 +177,21 @@ async def procesar_mensaje_alexis(
                 "Responde de forma concisa, profesional y en español."
             )
 
-            imagen_bytes = {
-                "mime_type": "image/jpeg",
-                "data": image_base64
-            }
+            # Decodificar el Base64 recibido del frontend
+            image_bytes = base64.b64decode(image_base64)
 
-            response_gemini = modelo_vision.generate_content([prompt_vision, imagen_bytes])
-            contenido_limpio = response_gemini.text.strip()
+            # Inferencia multimodal directa
+            response = client.models.generate_content(
+                model=VISION_MODEL,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    prompt_vision
+                ]
+            )
 
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
-                response=contenido_limpio
+                response=response.text.strip()
             )
         except Exception as e:
             return AssistantResponse(
