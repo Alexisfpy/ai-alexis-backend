@@ -15,7 +15,7 @@ from tavily import TavilyClient
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/llama-3.1-8b-instant"
-VISION_MODEL = "gemini/gemini-1.5-pro-latest" # Modelo de vision estable
+VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct" # Modelo de vision estable
 
 # FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -155,15 +155,6 @@ async def procesar_mensaje_alexis(
     # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (SI HAY IMAGEN) ---
     if image_base64:
         try:
-            gemini_key = os.getenv("GEMINI_API_KEY")
-            if not gemini_key:
-                return AssistantResponse(
-                    intent="IMAGE_ANALYSIS",
-                    response="La variable GEMINI_API_KEY no está configurada en las variables de entorno."
-                )
-
-            os.environ["GEMINI_API_KEY"] = gemini_key
-
             texto_usuario = message.strip() if message and message.strip() else "Analiza y describe esta imagen en detalle."
             mensajes_vision = [
                 {
@@ -188,7 +179,7 @@ async def procesar_mensaje_alexis(
 
             vision_response = litellm.completion(
                 model=VISION_MODEL,
-                api_key=gemini_key,  # Usamos la API Key de Gemini
+                api_key=api_key,  # 👈 Usa tu clave de Groq directamente
                 messages=mensajes_vision
             )
 
