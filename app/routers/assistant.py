@@ -15,7 +15,7 @@ from tavily import TavilyClient
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/llama-3.1-8b-instant"
-VISION_MODEL = "groq/meta-llama/llama-4-scout-17b-16e-instruct" # Modelo de vision estable
+VISION_MODEL = "openai/qwen/qwen3.6-27b" # Modelo de vision estable
 
 # FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -179,7 +179,8 @@ async def procesar_mensaje_alexis(
 
             vision_response = litellm.completion(
                 model=VISION_MODEL,
-                api_key=api_key,  # 👈 Usa tu clave de Groq directamente
+                api_key=api_key,
+                base_url="https://api.groq.com/openai/v1",  # Enrutado directo a la API de Groq
                 messages=mensajes_vision
             )
 
