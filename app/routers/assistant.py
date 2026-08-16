@@ -16,8 +16,8 @@ from tavily import TavilyClient
 from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
 
 # --- CONFIGURACIÓN DE MODELOS ---
-TEXT_MODEL = "openai/gpt-oss-20b"
-VISION_MODEL = "openai/qwen/qwen3.6-27b"
+TEXT_MODEL = "openai/llama-3.3-70b-versatile"
+VISION_MODEL = "openai/qwen/qwen3.6-27b" # Modelo de vision estable
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -591,29 +591,3 @@ async def handle_upload_cv(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar y guardar: {str(e)}")
-
-
-@router.post("/upload-document")
-async def upload_document(
-    file: UploadFile = File(...),
-    user_id: str = Form(...)
-):
-    try:
-        content_bytes = await file.read()
-        if file.filename.lower().endswith(".pdf"):
-            texto = extract_text_from_pdf(content_bytes)
-        else:
-            texto = content_bytes.decode("utf-8", errors="ignore")
-
-        if not texto.strip():
-            return {"status": "error", "message": "El documento está vacío o no contiene texto legible."}
-
-        num_chunks = index_document_content(user_id=user_id, filename=file.filename, text=texto)
-        return {
-            "status": "success",
-            "filename": file.filename,
-            "chunks_indexed": num_chunks,
-            "message": f"Documento indexado con éxito ({num_chunks} fragmentos vectorizados)."
-        }
-    except Exception as e:
-        return {"status": "error", "message": f"Error al procesar el documento: {str(e)}"}
