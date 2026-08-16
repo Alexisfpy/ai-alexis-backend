@@ -14,10 +14,11 @@ from pathlib import Path
 from app.services.weather_service import obtener_clima_open_meteo
 from tavily import TavilyClient
 from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
+import google.generativeai as genai
 
 # --- CONFIGURACIÓN DE MODELOS ---
-TEXT_MODEL = "openai/llama-3.3-70b-versatile"
-VISION_MODEL = "groq/llama-3.2-11b-vision-preview" # Modelo de vision estable
+TEXT_MODEL = "openai/llama-3.3-70b-versatile" # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
+VISION_MODEL = "gemini-2.0-flash" # Google AI (Visión y análisis de imágenes)
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -155,43 +156,34 @@ async def procesar_mensaje_alexis(
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
-    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN ---
+    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (GOOGLE GEMINI DIRECTO) ---
     if image_base64:
         try:
+            gemini_key = os.getenv("GEMINI_API_KEY")
+            if not gemini_key:
+                return AssistantResponse(
+                    intent="IMAGE_ANALYSIS",
+                    response="⚠️ Falta configurar la variable GEMINI_API_KEY en el servidor para el análisis de visión."
+                )
+
+            genai.configure(api_key=gemini_key)
+            modelo_vision = genai.GenerativeModel(VISION_MODEL)
+
             texto_usuario = message.strip() if message and message.strip() else "Analiza y describe esta imagen en detalle."
-            
             prompt_vision = (
-                "Eres AI Alexis, un asistente virtual de IA directo, técnico y elegante.\n"
-                "Analiza la imagen y responde con precisión a la consulta del usuario.\n\n"
-                "REGLAS:\n"
-                "1. NUNCA incluyas etiquetas de pensamiento interno (<think>).\n"
-                "2. Ve directamente al grano: resume lo principal y luego detalla textos y elementos clave.\n"
-                "3. Mantén una redacción concisa, profesional y en español."
+                "Eres AI Alexis, un asistente virtual directo, técnico y elegante.\n"
+                f"Consulta del usuario: {texto_usuario}\n"
+                "Responde de forma concisa, profesional y en español."
             )
 
-            mensajes_vision = [
-                {"role": "system", "content": prompt_vision},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": texto_usuario},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-                        }
-                    ]
-                }
-            ]
+            # Enviar directamente la imagen en base64 sin intermediarios de red
+            imagen_bytes = {
+                "mime_type": "image/jpeg",
+                "data": image_base64
+            }
 
-            vision_response = litellm.completion(
-                model=VISION_MODEL,
-                api_key=api_key,
-                base_url="https://api.groq.com/openai/v1",
-                messages=mensajes_vision
-            )
-
-            contenido_bruto = vision_response.choices[0].message.content or ""
-            contenido_limpio = re.sub(r'<think>.*?</think>', '', contenido_bruto, flags=re.DOTALL).strip()
+            response_gemini = modelo_vision.generate_content([prompt_vision, imagen_bytes])
+            contenido_limpio = response_gemini.text.strip()
 
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
@@ -200,7 +192,7 @@ async def procesar_mensaje_alexis(
         except Exception as e:
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
-                response=f"Ocurrió un error al procesar la imagen con el modelo de visión: {str(e)}"
+                response=f"Error al analizar la imagen: {str(e)}"
             )
 
     # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO ---
