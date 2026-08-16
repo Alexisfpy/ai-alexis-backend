@@ -15,7 +15,7 @@ from app.services.weather_service import obtener_clima_open_meteo
 from tavily import TavilyClient
 
 # --- CONFIGURACIÓN DE MODELOS ---
-TEXT_MODEL = "openai/gpt-oss-20b"
+TEXT_MODEL = "openai/llama-3.3-70b-versatile"
 VISION_MODEL = "openai/qwen/qwen3.6-27b" # Modelo de vision estable
 
 # FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env
