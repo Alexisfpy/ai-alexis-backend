@@ -179,16 +179,18 @@ async def procesar_mensaje_alexis(
 
             image_bytes = base64.b64decode(image_base64)
 
-            # ✅ NUEVA LLAMADA CON INTERACTIONS API
+            # Opción A (recomendada)
             response = client.interactions.create(
                 model=VISION_MODEL,
-                input=prompt_vision,
-                parts=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")]
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                    prompt_vision
+                ]
             )
 
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
-                response=response.output_text.strip()   # <-- output_text, no text
+                response=response.output_text.strip()
             )
         except Exception as e:
             return AssistantResponse(
