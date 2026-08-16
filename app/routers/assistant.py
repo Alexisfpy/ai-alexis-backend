@@ -1,6 +1,7 @@
 import os
 import io
 import litellm
+import re
 from litellm import completion
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from app.schemas.assistant import AssistantRequest, AssistantResponse
@@ -156,15 +157,18 @@ async def procesar_mensaje_alexis(
     if image_base64:
         try:
             texto_usuario = message.strip() if message and message.strip() else "Analiza y describe esta imagen en detalle."
+            
+            prompt_vision = (
+                "Eres AI Alexis, un asistente virtual de IA directo, técnico y elegante.\n"
+                "Analiza la imagen y responde con precisión a la consulta del usuario.\n\n"
+                "REGLAS:\n"
+                "1. NUNCA incluyas etiquetas de pensamiento interno (<think>).\n"
+                "2. Ve directamente al grano: resume lo principal y luego detalla textos y elementos clave.\n"
+                "3. Mantén una redacción concisa, profesional y en español."
+            )
+
             mensajes_vision = [
-                {
-                    "role": "system",
-                    "content": (
-                        "Eres AI Alexis, un asistente virtual de IA avanzado con capacidades de visión por computador. "
-                        "Analiza detalladamente la imagen proporcionada, responde a la petición del usuario de forma técnica, "
-                        "precisa y elegante en español."
-                    )
-                },
+                {"role": "system", "content": prompt_vision},
                 {
                     "role": "user",
                     "content": [
@@ -180,13 +184,17 @@ async def procesar_mensaje_alexis(
             vision_response = litellm.completion(
                 model=VISION_MODEL,
                 api_key=api_key,
-                base_url="https://api.groq.com/openai/v1",  # Enrutado directo a la API de Groq
+                base_url="https://api.groq.com/openai/v1",
                 messages=mensajes_vision
             )
 
+            # 🧹 Limpieza automática: eliminamos cualquier etiqueta <think>...</think>
+            contenido_bruto = vision_response.choices[0].message.content or ""
+            contenido_limpio = re.sub(r'<think>.*?</think>', '', contenido_bruto, flags=re.DOTALL).strip()
+
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
-                response=vision_response.choices[0].message.content
+                response=contenido_limpio
             )
         except Exception as e:
             return AssistantResponse(
