@@ -13,12 +13,13 @@ from dotenv import load_dotenv
 from pathlib import Path
 from app.services.weather_service import obtener_clima_open_meteo
 from tavily import TavilyClient
+from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/gpt-oss-20b"
-VISION_MODEL = "openai/qwen/qwen3.6-27b" # Modelo de vision estable
+VISION_MODEL = "openai/qwen/qwen3.6-27b"
 
-# FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env
+# RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
 ruta_env = ruta_raiz / ".env"
 load_dotenv(dotenv_path=ruta_env)
@@ -148,12 +149,13 @@ async def procesar_mensaje_alexis(
     cv_texto: str, 
     api_key: str, 
     user_id: str = "guest_user",
-    image_base64: str = None
+    image_base64: str = None,
+    rag_context: str = ""
 ) -> AssistantResponse:
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
-    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (SI HAY IMAGEN) ---
+    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN ---
     if image_base64:
         try:
             texto_usuario = message.strip() if message and message.strip() else "Analiza y describe esta imagen en detalle."
@@ -188,7 +190,6 @@ async def procesar_mensaje_alexis(
                 messages=mensajes_vision
             )
 
-            # 🧹 Limpieza automática: eliminamos cualquier etiqueta <think>...</think>
             contenido_bruto = vision_response.choices[0].message.content or ""
             contenido_limpio = re.sub(r'<think>.*?</think>', '', contenido_bruto, flags=re.DOTALL).strip()
 
@@ -210,7 +211,7 @@ async def procesar_mensaje_alexis(
         "- 'CV_OPTIMIZATION' (si quiere adaptar su CV, currículum o habla de ofertas de empleo)\n"
         "- 'DOMOTICS_CONTROL' (si habla de controlar luces, sensores, domótica o IoT)\n"
         "- 'WEB_SEARCH' (noticias, resultados deportivos, eventos o datos en tiempo real que NO sean el clima)\n"
-        "- 'GENERAL_CHAT' (para saludos, charla casual, programación o dudas de conocimiento estático)\n\n"
+        "- 'GENERAL_CHAT' (para saludos, charla casual, preguntas sobre documentos subidos o programación)\n\n"
         "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas, sin introducciones ni explicaciones."
     )
 
@@ -398,7 +399,7 @@ async def procesar_mensaje_alexis(
             response=chat_response.choices[0].message.content
         )
         
-    # --- 5. INTENCIÓN: CHARLA GENERAL ---
+    # --- 5. INTENCIÓN: CHARLA GENERAL Y RAG DOCUMENTAL ---
     else:
         historial_previo = []
         doc = history_collection.find_one({"_id": user_id})
@@ -407,6 +408,15 @@ async def procesar_mensaje_alexis(
                 historial_previo.append({"role": m["role"], "content": m["content"]})
 
         contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil registrado."
+        
+        # Inyección de contexto documental recuperado por búsqueda vectorial (RAG)
+        contexto_documentos = ""
+        if rag_context:
+            contexto_documentos = (
+                f"\n--- INFORMACIÓN DE LA BASE DE CONOCIMIENTO (DOCUMENTOS INDEXADOS) ---\n"
+                f"{rag_context}\n"
+                f"--------------------------------------------------------------------\n"
+            )
 
         prompt_sistema = {
             "role": "system",
@@ -415,8 +425,12 @@ async def procesar_mensaje_alexis(
                 f"Estás hablando con el usuario registrado (ID de sesión: {user_id}).\n"
                 f"--- DATOS DEL PERFIL DEL USUARIO ---\n"
                 f"{contexto_perfil}\n"
-                f"------------------------------------\n\n"
-                f"REGLA: Usa esta información para saber exactamente con quién hablas cuando te pregunte por su identidad o perfil. Responde siempre de forma clara, directa y en español."
+                f"------------------------------------\n"
+                f"{contexto_documentos}\n"
+                f"REGLAS:\n"
+                f"1. Si se proporciona información de la BASE DE CONOCIMIENTO, úsala como fuente principal de verdad técnica.\n"
+                f"2. Usa los datos del perfil para responder dudas sobre identidad y experiencia.\n"
+                f"3. Responde siempre de forma clara, concisa y en español."
             )
         }
         
@@ -460,16 +474,21 @@ async def handle_assistant_chat(payload: AssistantRequest):
         cv_a_procesar = db_profile["cv_text"]
     else:
         cv_a_procesar = payload.cv_text or BASE_CV
+
+    # Inyección semántica RAG
+    rag_context = ""
+    if payload.message:
+        rag_context = vector_search(user_id=user_id, query=payload.message, limit=3)
         
     resultado = await procesar_mensaje_alexis(
         message=payload.message, 
         cv_texto=cv_a_procesar, 
         api_key=api_key, 
         user_id=user_id,
-        image_base64=payload.image
+        image_base64=payload.image,
+        rag_context=rag_context
     )
 
-    # Si se envió imagen, registramos la acción en el historial
     texto_guardado = payload.message or "📸 [Imagen enviada]"
     if payload.image and not payload.message:
         texto_guardado = "📸 [Análisis de imagen]"
@@ -493,8 +512,8 @@ async def handle_assistant_voice(
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
 
+    nombre_archivo_temporal = f"temp_{file.filename}"
     try:
-        nombre_archivo_temporal = f"temp_{file.filename}"
         with open(nombre_archivo_temporal, "wb") as f:
             f.write(await file.read())
 
@@ -517,11 +536,15 @@ async def handle_assistant_voice(
         else:
             cv_a_procesar = cv_text or BASE_CV
 
+        # Búsqueda semántica RAG para mensajes por voz
+        rag_context = vector_search(user_id=user_id, query=texto_transcrito, limit=3)
+
         resultado = await procesar_mensaje_alexis(
             message=texto_transcrito, 
             cv_texto=cv_a_procesar, 
             api_key=api_key, 
-            user_id=user_id
+            user_id=user_id,
+            rag_context=rag_context
         )
         respuesta_formateada = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
         
@@ -568,3 +591,29 @@ async def handle_upload_cv(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar y guardar: {str(e)}")
+
+
+@router.post("/upload-document")
+async def upload_document(
+    file: UploadFile = File(...),
+    user_id: str = Form(...)
+):
+    try:
+        content_bytes = await file.read()
+        if file.filename.lower().endswith(".pdf"):
+            texto = extract_text_from_pdf(content_bytes)
+        else:
+            texto = content_bytes.decode("utf-8", errors="ignore")
+
+        if not texto.strip():
+            return {"status": "error", "message": "El documento está vacío o no contiene texto legible."}
+
+        num_chunks = index_document_content(user_id=user_id, filename=file.filename, text=texto)
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "chunks_indexed": num_chunks,
+            "message": f"Documento indexado con éxito ({num_chunks} fragmentos vectorizados)."
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Error al procesar el documento: {str(e)}"}
