@@ -179,13 +179,15 @@ async def procesar_mensaje_alexis(
 
             image_bytes = base64.b64decode(image_base64)
 
-            # Opción A (recomendada)
+            # ✅ CREAR UNA LISTA DE PARTES: imagen y texto
+            partes = [
+                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
+                types.Part.from_text(text=prompt_vision)
+            ]
+
             response = client.interactions.create(
-                model=VISION_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    prompt_vision
-                ]
+                model=VISION_MODEL,          # "gemini-3.6-flash"
+                input=partes                 # <--- clave: 'input', no 'contents'
             )
 
             return AssistantResponse(
