@@ -20,7 +20,7 @@ from google.genai import types
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/llama-3.3-70b-versatile" # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
-VISION_MODEL = "gemini-2.5-flash" # Google AI (Visión y análisis de imágenes)
+VISION_MODEL = "gemini-3.6-flash" # Google AI (Visión y análisis de imágenes)
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -177,21 +177,18 @@ async def procesar_mensaje_alexis(
                 "Responde de forma concisa, profesional y en español."
             )
 
-            # Decodificar el Base64 recibido del frontend
             image_bytes = base64.b64decode(image_base64)
 
-            # Inferencia multimodal directa
-            response = client.models.generate_content(
+            # ✅ NUEVA LLAMADA CON INTERACTIONS API
+            response = client.interactions.create(
                 model=VISION_MODEL,
-                contents=[
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                    prompt_vision
-                ]
+                input=prompt_vision,
+                parts=[types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")]
             )
 
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
-                response=response.text.strip()
+                response=response.output_text.strip()   # <-- output_text, no text
             )
         except Exception as e:
             return AssistantResponse(
@@ -587,3 +584,28 @@ async def handle_upload_cv(
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar y guardar: {str(e)}")
+
+@router.post("/upload-document")
+async def upload_document(
+    file: UploadFile = File(...),
+    user_id: str = Form(...)
+):
+    try:
+        content_bytes = await file.read()
+        if file.filename.lower().endswith(".pdf"):
+            texto = extract_text_from_pdf(content_bytes)
+        else:
+            texto = content_bytes.decode("utf-8", errors="ignore")
+
+        if not texto.strip():
+            return {"status": "error", "message": "El documento está vacío o no contiene texto legible."}
+
+        num_chunks = index_document_content(user_id=user_id, filename=file.filename, text=texto)
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "chunks_indexed": num_chunks,
+            "message": f"Documento indexado con éxito ({num_chunks} fragmentos vectorizados)."
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Error al procesar el documento: {str(e)}"}
