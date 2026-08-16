@@ -18,7 +18,7 @@ import google.generativeai as genai
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/llama-3.3-70b-versatile" # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
-VISION_MODEL = "gemini-2.0-flash" # Google AI (Visión y análisis de imágenes)
+VISION_MODEL = "gemini-1.5-flash" # Google AI (Visión y análisis de imágenes)
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -156,14 +156,14 @@ async def procesar_mensaje_alexis(
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
-    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (GOOGLE GEMINI DIRECTO) ---
+    # --- 0. PROCESAMIENTO MULTIMODAL CON VISIÓN (GOOGLE GEMINI) ---
     if image_base64:
         try:
             gemini_key = os.getenv("GEMINI_API_KEY")
             if not gemini_key:
                 return AssistantResponse(
                     intent="IMAGE_ANALYSIS",
-                    response="⚠️ Falta configurar la variable GEMINI_API_KEY en el servidor para el análisis de visión."
+                    response="⚠️ Falta configurar la variable GEMINI_API_KEY en el servidor."
                 )
 
             genai.configure(api_key=gemini_key)
@@ -176,7 +176,6 @@ async def procesar_mensaje_alexis(
                 "Responde de forma concisa, profesional y en español."
             )
 
-            # Enviar directamente la imagen en base64 sin intermediarios de red
             imagen_bytes = {
                 "mime_type": "image/jpeg",
                 "data": image_base64
