@@ -179,20 +179,18 @@ async def procesar_mensaje_alexis(
 
             image_bytes = base64.b64decode(image_base64)
 
-            # ✅ CREAR UNA LISTA DE PARTES: imagen y texto
-            partes = [
-                types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"),
-                types.Part.from_text(text=prompt_vision)
-            ]
-
-            response = client.interactions.create(
-                model=VISION_MODEL,          # "gemini-3.6-flash"
-                input=partes                 # <--- clave: 'input', no 'contents'
+            # ✅ USAR generate_content (API estable) con el nuevo modelo
+            response = client.models.generate_content(
+                model=VISION_MODEL,  # "gemini-3.6-flash"
+                contents=[
+                    prompt_vision,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
+                ]
             )
 
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
-                response=response.output_text.strip()
+                response=response.text.strip()   # <-- text, no output_text
             )
         except Exception as e:
             return AssistantResponse(
