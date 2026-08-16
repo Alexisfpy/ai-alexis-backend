@@ -162,6 +162,8 @@ async def procesar_mensaje_alexis(
                     response="La variable GEMINI_API_KEY no está configurada en las variables de entorno."
                 )
 
+            os.environ["GEMINI_API_KEY"] = gemini_key
+
             texto_usuario = message.strip() if message and message.strip() else "Analiza y describe esta imagen en detalle."
             mensajes_vision = [
                 {
@@ -186,7 +188,7 @@ async def procesar_mensaje_alexis(
 
             vision_response = litellm.completion(
                 model=VISION_MODEL,
-                api_key=gemini_key,  # 👈 Usamos la API Key de Gemini
+                api_key=gemini_key,  # Usamos la API Key de Gemini
                 messages=mensajes_vision
             )
 
