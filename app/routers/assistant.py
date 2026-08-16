@@ -15,7 +15,7 @@ from tavily import TavilyClient
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "openai/llama-3.1-8b-instant"
-VISION_MODEL = "emini/gemini-2.0-flash" # Modelo de vision 
+VISION_MODEL = "gemini/gemini-2.0-flash" # Modelo de vision 
 
 # FORZAMOS LA RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
