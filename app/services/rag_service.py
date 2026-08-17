@@ -1,17 +1,23 @@
-import io
 import os
+import io
 from pypdf import PdfReader
-from fastembed import TextEmbedding
 from pymongo import MongoClient
+from google import genai
 
-# Cliente global de MongoDB Atlas (reutiliza el pool de conexiones)
+# --- CONEXIÓN MONGODB ATLAS ---
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
 client = MongoClient(MONGODB_URI)
 db = client["ai_alexis_db"]
 knowledge_collection = db["knowledge_base"]
 
-# Modelo de embeddings de 384 dimensiones
-embedding_model = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
+EMBEDDING_MODEL = "gemini-embedding-001"
+
+
+def get_gemini_client():
+    gemini_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY no configurada en las variables de entorno.")
+    return genai.Client(api_key=gemini_key)
 
 
 def chunk_text(text: str, chunk_size: int = 400, overlap: int = 40) -> list[str]:
@@ -26,7 +32,7 @@ def chunk_text(text: str, chunk_size: int = 400, overlap: int = 40) -> list[str]
 
 
 def extract_text_from_pdf(file_bytes: bytes) -> str:
-    """Extrae texto de documentos PDF."""
+    """Extrae texto de un archivo PDF."""
     try:
         reader = PdfReader(io.BytesIO(file_bytes))
         full_text = ""
@@ -36,41 +42,66 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
                 full_text += extracted + "\n"
         return full_text.strip()
     except Exception as e:
-        print(f"❌ Error extrayendo PDF: {e}")
+        print(f"❌ Error al extraer PDF: {e}")
         return ""
 
 
 def index_document_content(user_id: str, filename: str, text: str) -> int:
-    """Fragmenta, vectoriza y almacena el contenido en Atlas."""
+    """Fragmenta, genera embeddings en la nube de Google y guarda en Atlas."""
     try:
         chunks = chunk_text(text)
         if not chunks:
             return 0
 
-        embeddings = list(embedding_model.embed(chunks))
-        docs = [
-            {
+        ai_client = get_gemini_client()
+        docs = []
+
+        for chunk in chunks:
+            res = ai_client.models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=chunk
+            )
+            
+            # Extraer vector de 768 dimensiones
+            if hasattr(res, "embedding") and res.embedding:
+                vector = list(res.embedding.values)
+            elif hasattr(res, "embeddings") and res.embeddings:
+                vector = list(res.embeddings[0].values)
+            else:
+                continue
+
+            docs.append({
                 "user_id": user_id,
                 "filename": filename,
                 "text": chunk,
-                "embedding": vector.tolist()
-            }
-            for chunk, vector in zip(chunks, embeddings)
-        ]
-        
-        # Elimina versiones anteriores del mismo archivo para el usuario
-        knowledge_collection.delete_many({"user_id": user_id, "filename": filename})
-        knowledge_collection.insert_many(docs)
+                "embedding": vector
+            })
+
+        if docs:
+            knowledge_collection.delete_many({"user_id": user_id, "filename": filename})
+            knowledge_collection.insert_many(docs)
+
         return len(docs)
     except Exception as e:
-        print(f"❌ Error indexando contenido: {e}")
+        print(f"❌ Error al indexar documento con Gemini API: {e}")
         return 0
 
 
 def vector_search(user_id: str, query: str, limit: int = 3) -> str:
-    """Ejecuta búsqueda vectorial semántica en Atlas."""
+    """Realiza la búsqueda semántica en Atlas usando el embedding de la consulta."""
     try:
-        query_vector = list(embedding_model.embed([query]))[0].tolist()
+        ai_client = get_gemini_client()
+        res = ai_client.models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=query
+        )
+
+        if hasattr(res, "embedding") and res.embedding:
+            query_vector = list(res.embedding.values)
+        elif hasattr(res, "embeddings") and res.embeddings:
+            query_vector = list(res.embeddings[0].values)
+        else:
+            return ""
 
         pipeline = [
             {
@@ -101,5 +132,5 @@ def vector_search(user_id: str, query: str, limit: int = 3) -> str:
 
         return "\n\n".join([f"📄 [Doc: {r.get('filename', 'Archivo')}]: {r['text']}" for r in results])
     except Exception as e:
-        print(f"⚠️ Error en búsqueda vectorial: {e}")
+        print(f"⚠️ Error en vector_search: {e}")
         return ""
