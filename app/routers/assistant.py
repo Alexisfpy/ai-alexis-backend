@@ -454,9 +454,13 @@ async def get_user_chat_history(user_id: str):
 
 @router.post("/chat", response_model=AssistantResponse)
 async def handle_assistant_chat(payload: AssistantRequest):
-    api_key = payload.groq_api_key or os.getenv("GROQ_API_KEY")
+    # Sanitizar la API Key recibida del frontend
+    api_key = payload.groq_api_key
+    if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
+        api_key = os.getenv("GROQ_API_KEY")
+
     if not api_key:
-        raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
+        raise HTTPException(status_code=400, detail="API Key de Groq no configurada en el servidor.")
     
     user_id = payload.user_id or "guest_user"
     
@@ -466,10 +470,14 @@ async def handle_assistant_chat(payload: AssistantRequest):
     else:
         cv_a_procesar = payload.cv_text or BASE_CV
 
-    # Inyección semántica RAG
+    # Inyección semántica RAG protegida
     rag_context = ""
     if payload.message:
-        rag_context = vector_search(user_id=user_id, query=payload.message, limit=3)
+        try:
+            rag_context = vector_search(user_id=user_id, query=payload.message, limit=3)
+        except Exception as e:
+            print(f"⚠️ Error en vector_search: {e}")
+            rag_context = ""
         
     resultado = await procesar_mensaje_alexis(
         message=payload.message, 
