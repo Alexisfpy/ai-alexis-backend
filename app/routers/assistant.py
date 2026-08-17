@@ -19,7 +19,7 @@ from google import genai
 from google.genai import types
 
 # --- CONFIGURACIÓN DE MODELOS ---
-TEXT_MODEL = "groq/llama-3.3-70b-versatile" # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
+TEXT_MODEL = "groq/llama-3.3-70b-specdec" # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
 VISION_MODEL = "gemini-3.6-flash" # Google AI (Visión y análisis de imágenes)
 
 # RUTA ABSOLUTA AL ARCHIVO .env
