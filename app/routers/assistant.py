@@ -419,10 +419,11 @@ async def procesar_mensaje_alexis(
                 f"{contexto_perfil}\n"
                 f"------------------------------------\n"
                 f"{contexto_documentos}\n"
-                f"REGLAS:\n"
-                f"1. Si se proporciona información de la BASE DE CONOCIMIENTO, úsala como fuente principal y obligatoria de verdad técnica para responder.\n"
+                f"REGLAS OBLIGATORIAS:\n"
+                f"1. Si se proporciona información de la BASE DE CONOCIMIENTO, úsala como fuente principal y obligatoria de verdad técnica.\n"
                 f"2. Usa los datos del perfil para responder dudas sobre identidad y experiencia.\n"
-                f"3. Responde siempre de forma clara, concisa y en español."
+                f"3. FORMATO VISUAL: NUNCA generes tablas con barras Markdown (|). Presenta siempre la información en listas con viñetas (*), títulos en negrita y saltos de línea limpios entre elementos.\n"
+                f"4. Responde siempre de forma clara, concisa y en español."
             )
         }
         
