@@ -179,9 +179,8 @@ async def procesar_mensaje_alexis(
 
             image_bytes = base64.b64decode(image_base64)
 
-            # ✅ USAR generate_content (API estable) con el nuevo modelo
             response = client.models.generate_content(
-                model=VISION_MODEL,  # "gemini-3.6-flash"
+                model=VISION_MODEL,
                 contents=[
                     prompt_vision,
                     types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
@@ -190,7 +189,7 @@ async def procesar_mensaje_alexis(
 
             return AssistantResponse(
                 intent="IMAGE_ANALYSIS",
-                response=response.text.strip()   # <-- text, no output_text
+                response=response.text.strip()
             )
         except Exception as e:
             return AssistantResponse(
@@ -198,31 +197,36 @@ async def procesar_mensaje_alexis(
                 response=f"Error al analizar la imagen: {str(e)}"
             )
 
-    # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO ---
-    system_prompt = (
-        "Eres el clasificador de intenciones de AI Alexis.\n"
-        "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
-        "- 'WEATHER' (si pregunta por el tiempo, clima, temperatura, grados, predicción meteorológica o lluvia)\n"
-        "- 'CV_OPTIMIZATION' (si quiere adaptar su CV, currículum o habla de ofertas de empleo)\n"
-        "- 'DOMOTICS_CONTROL' (si habla de controlar luces, sensores, domótica o IoT)\n"
-        "- 'WEB_SEARCH' (noticias, resultados deportivos, eventos o datos en tiempo real que NO sean el clima)\n"
-        "- 'GENERAL_CHAT' (para saludos, charla casual, preguntas sobre documentos subidos o programación)\n\n"
-        "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas, sin introducciones ni explicaciones."
-    )
+    # --- EVALUACIÓN DE CONTEXTO RAG ---
+    # Si la búsqueda vectorial encontró coincidencias en los documentos, priorizamos respuesta documental
+    if rag_context and rag_context.strip():
+        user_intent = "GENERAL_CHAT"
+    else:
+        # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO ---
+        system_prompt = (
+            "Eres el clasificador de intenciones de AI Alexis.\n"
+            "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
+            "- 'WEATHER' (si pregunta por el tiempo, clima, temperatura, grados, predicción meteorológica o lluvia)\n"
+            "- 'CV_OPTIMIZATION' (si quiere adaptar su CV, currículum o habla de ofertas de empleo)\n"
+            "- 'DOMOTICS_CONTROL' (si habla de controlar luces, sensores, domótica o IoT)\n"
+            "- 'WEB_SEARCH' (noticias, resultados deportivos, eventos o datos en tiempo real que NO sean el clima)\n"
+            "- 'GENERAL_CHAT' (para saludos, charla casual, dudas generales o programación)\n\n"
+            "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas, sin comillas, introducciones ni explicaciones."
+        )
 
-    classification = litellm.completion(
-        model=TEXT_MODEL,
-        api_key=api_key,
-        base_url="https://api.groq.com/openai/v1",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": message}
-        ],
-        temperature=0.0
-    )
+        classification = litellm.completion(
+            model=TEXT_MODEL,
+            api_key=api_key,
+            base_url="https://api.groq.com/openai/v1",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": message}
+            ],
+            temperature=0.0
+        )
 
-    user_intent = classification.choices[0].message.content.strip().upper()
-    user_intent = user_intent.replace("'", "").replace('"', "").replace(".", "").strip()
+        user_intent = classification.choices[0].message.content.strip().upper()
+        user_intent = user_intent.replace("'", "").replace('"', "").replace(".", "").strip()
 
     # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA ---
     if "WEATHER" in user_intent:
@@ -404,7 +408,7 @@ async def procesar_mensaje_alexis(
 
         contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil registrado."
         
-        # Inyección de contexto documental recuperado por búsqueda vectorial (RAG)
+        # Inyección semántica de la base de conocimiento (RAG)
         contexto_documentos = ""
         if rag_context:
             contexto_documentos = (
@@ -423,7 +427,7 @@ async def procesar_mensaje_alexis(
                 f"------------------------------------\n"
                 f"{contexto_documentos}\n"
                 f"REGLAS:\n"
-                f"1. Si se proporciona información de la BASE DE CONOCIMIENTO, úsala como fuente principal de verdad técnica.\n"
+                f"1. Si se proporciona información de la BASE DE CONOCIMIENTO, úsala como fuente principal y obligatoria de verdad técnica para responder.\n"
                 f"2. Usa los datos del perfil para responder dudas sobre identidad y experiencia.\n"
                 f"3. Responde siempre de forma clara, concisa y en español."
             )
