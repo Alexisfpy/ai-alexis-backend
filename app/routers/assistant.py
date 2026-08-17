@@ -99,7 +99,6 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
         response = litellm.completion(
             model=TEXT_MODEL,
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
             messages=[
                 {"role": "system", "content": prompt_optimizador},
                 {"role": "user", "content": mensaje_usuario}
@@ -217,7 +216,6 @@ async def procesar_mensaje_alexis(
         classification = litellm.completion(
             model=TEXT_MODEL,
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": message}
@@ -241,7 +239,6 @@ async def procesar_mensaje_alexis(
             res_loc = litellm.completion(
                 model=TEXT_MODEL,
                 api_key=api_key,
-                base_url="https://api.groq.com/openai/v1",
                 messages=[
                     {"role": "system", "content": prompt_ubicacion},
                     {"role": "user", "content": message}
@@ -276,7 +273,6 @@ async def procesar_mensaje_alexis(
             chat_response = litellm.completion(
                 model=TEXT_MODEL,
                 api_key=api_key,
-                base_url="https://api.groq.com/openai/v1",
                 messages=[{"role": "user", "content": prompt_respuesta_clima}]
             )
 
@@ -297,7 +293,6 @@ async def procesar_mensaje_alexis(
             extraction = litellm.completion(
                 model=TEXT_MODEL,
                 api_key=api_key,
-                base_url="https://api.groq.com/openai/v1",
                 messages=[
                     {"role": "system", "content": "Extrae exclusivamente la descripción detallada del puesto de trabajo o los requisitos del mensaje del usuario. Elimina saludos o textos irrelevantes."},
                     {"role": "user", "content": message}
@@ -308,7 +303,6 @@ async def procesar_mensaje_alexis(
 
             llm_groq = LLM(
                 model=TEXT_MODEL,  
-                base_url="https://api.groq.com/openai/v1", 
                 api_key=api_key
             )
 
@@ -390,7 +384,6 @@ async def procesar_mensaje_alexis(
         chat_response = litellm.completion(
             model=TEXT_MODEL,
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
             messages=[{"role": "user", "content": prompt_final}]
         )
         return AssistantResponse(
@@ -438,7 +431,6 @@ async def procesar_mensaje_alexis(
         chat_response = litellm.completion(
             model=TEXT_MODEL,
             api_key=api_key,
-            base_url="https://api.groq.com/openai/v1",
             messages=mensajes_para_llm
         )
         return AssistantResponse(
