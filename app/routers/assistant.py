@@ -15,7 +15,7 @@ from pypdf import PdfReader
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from pathlib import Path
-from app.services.weather_service import obtener_clima_open_meteo, consultar_clima_open_meteo
+from app.services.weather_service import consultar_clima_open_meteo
 from tavily import TavilyClient
 from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
 import base64
