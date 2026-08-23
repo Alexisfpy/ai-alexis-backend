@@ -43,18 +43,19 @@ async def obtener_coordenadas(ciudad: str) -> tuple[float, float, str] | None:
         print(f"⚠️ Error en geocoding de Open-Meteo: {e}")
     return None
 
-async def consultar_clima_open_meteo(ciudad: str) -> str:
-    """Consulta temperatura, sensación térmica, viento y estado del cielo en tiempo real."""
+async def consultar_clima_open_meteo(ciudad: str, dias: int = 0) -> dict:
+    """Obtiene el pronóstico para hoy o mañana (dias=0 hoy, dias=1 mañana)."""
     coords = await obtener_coordenadas(ciudad)
     if not coords:
-        return f"No pude encontrar las coordenadas geográficas para '{ciudad}'."
+        return {"error": f"No pude encontrar la ubicación '{ciudad}'."}
 
     lat, lon, ubicacion_nombre = coords
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
         "latitude": lat,
         "longitude": lon,
-        "current": ["temperature_2m", "relative_humidity_2m", "apparent_temperature", "weather_code", "wind_speed_10m"],
+        "daily": ["temperature_2m_max", "temperature_2m_min", "precipitation_probability_mean"],
+        "forecast_days": 2,  # para obtener hoy y mañana
         "timezone": "auto"
     }
 
@@ -62,21 +63,26 @@ async def consultar_clima_open_meteo(ciudad: str) -> str:
         async with httpx.AsyncClient() as client:
             res = await client.get(url, params=params, timeout=8.0)
             if res.status_code == 200:
-                current = res.json().get("current", {})
-                temp = current.get("temperature_2m")
-                sensacion = current.get("apparent_temperature")
-                humedad = current.get("relative_humidity_2m")
-                viento = current.get("wind_speed_10m")
-                wmo_code = current.get("weather_code", 0)
-                estado = WMO_CODES.get(wmo_code, "Condición variable")
+                data = res.json()
+                daily = data.get("daily", {})
+                times = daily.get("time", [])
+                if not times or len(times) < 2:
+                    return {"error": "No hay datos de pronóstico disponibles."}
 
-                return (
-                    f"Condiciones actuales en {ubicacion_nombre}:\n"
-                    f"- Estado: {estado}\n"
-                    f"- Temperatura: {temp}°C (Sensación térmica: {sensacion}°C)\n"
-                    f"- Humedad: {humedad}%\n"
-                    f"- Viento: {viento} km/h"
-                )
-            return f"Error en la API de Open-Meteo (Código: {res.status_code})."
+                # Índice: 0 = hoy, 1 = mañana
+                idx = dias if dias < len(times) else 0
+                fecha = times[idx]
+                max_temp = daily.get("temperature_2m_max", [None])[idx]
+                min_temp = daily.get("temperature_2m_min", [None])[idx]
+                prob_lluvia = daily.get("precipitation_probability_mean", [None])[idx]
+
+                return {
+                    "ubicacion": ubicacion_nombre,
+                    "fecha": fecha,
+                    "max": max_temp,
+                    "min": min_temp,
+                    "prob_lluvia": prob_lluvia
+                }
+            return {"error": f"Error en Open-Meteo (Código: {res.status_code})"}
     except Exception as e:
-        return f"Error al consultar el clima: {str(e)}"
+        return {"error": f"Error al consultar el clima: {str(e)}"}

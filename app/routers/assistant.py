@@ -222,15 +222,20 @@ async def procesar_mensaje_alexis(
     else:
         # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO (UNIFICADA SEARCH) ---
         system_prompt = (
-            "Eres el clasificador de intenciones de AI Alexis.\n"
-            "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
-            "- 'WEATHER' (si pregunta por el tiempo, clima, temperatura, grados, predicción meteorológica o lluvia)\n"
-            "- 'SEARCH' (si pide noticias, titulares, información de actualidad, búsquedas web generales, resultados deportivos o eventos en tiempo real)\n"
-            "- 'CV_OPTIMIZATION' (si quiere adaptar su CV, currículum o habla de ofertas de empleo)\n"
-            "- 'DOMOTICS_CONTROL' (si habla de controlar luces, sensores, domótica o IoT)\n"
-            "- 'GENERAL_CHAT' (para saludos, charla casual, dudas generales, programación o análisis de documentos)\n\n"
-            "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas, sin comillas, introducciones ni explicaciones."
-        )
+        "Eres el clasificador de intenciones de AI Alexis.\n"
+        "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
+        "- 'WEATHER' (si pregunta por el tiempo, clima, temperatura, grados, predicción meteorológica o lluvia).\n"
+        "  Ejemplos: '¿Qué tiempo hace en Madrid?' -> WEATHER, 'Temperatura para mañana en Vigo' -> WEATHER\n"
+        "- 'SEARCH' (si pide noticias, titulares, información de actualidad, búsquedas web generales, resultados deportivos).\n"
+        "  Ejemplos: 'Últimas noticias de OpenAI' -> SEARCH, '¿Quién ganó el partido de ayer?' -> SEARCH\n"
+        "- 'CV_OPTIMIZATION' (si quiere adaptar su CV, currículum o habla de ofertas de empleo).\n"
+        "  Ejemplo: 'Optimiza mi CV para un puesto de Data Scientist' -> CV_OPTIMIZATION\n"
+        "- 'DOMOTICS_CONTROL' (si habla de controlar luces, sensores, domótica o IoT).\n"
+        "  Ejemplo: 'Enciende la luz del salón' -> DOMOTICS_CONTROL\n"
+        "- 'GENERAL_CHAT' (para saludos, charla casual, dudas generales, programación o análisis de documentos).\n"
+        "  Ejemplo: 'Hola, ¿cómo estás?' -> GENERAL_CHAT\n\n"
+        "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas, sin comillas, introducciones ni explicaciones."
+    )
 
         classification = litellm.completion(
             model=TEXT_MODEL,
@@ -244,59 +249,43 @@ async def procesar_mensaje_alexis(
 
         user_intent = classification.choices[0].message.content.strip().upper()
         user_intent = re.sub(r'[^A-Z_]', '', user_intent)  # Limpieza adicional
+        print(f"🔍 INTENT DETECTED: {user_intent}")
 
     # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA (OPEN-METEO) ---
     if "WEATHER" in user_intent:
         try:
-            prompt_ubicacion = (
-                "Extrae ÚNICAMENTE el nombre de la ciudad, isla o municipio mencionado en el mensaje del usuario.\n"
-                "Ejemplo: 'Dime los grados de temperatura para mañana en Fuerteventura' -> 'Fuerteventura'\n"
-                "Ejemplo: '¿Va a llover en Sevilla hoy?' -> 'Sevilla'\n"
-                "Si no detectas ninguna ubicación explícita, responde 'Vigo'.\n"
-                "REGLA ESTRICTA: Responde SOLO con el nombre de la ubicación sin comillas ni signos."
-            )
-            res_loc = litellm.completion(
-                model=TEXT_MODEL,
-                api_key=api_key,
-                messages=[
-                    {"role": "system", "content": prompt_ubicacion},
-                    {"role": "user", "content": message}
-                ],
-                temperature=0.0
-            )
-            ubicacion_raw = res_loc.choices[0].message.content.strip()
-            # Validación con regex: solo letras, espacios y acentos
-            ubicacion = re.sub(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]', '', ubicacion_raw).strip()
+            # Extraer ubicación (como ya tienes)
+            ...
+            # Detectar si la consulta es para hoy o mañana
+            es_manana = "mañana" in message.lower() or "manana" in message.lower()
+            dias = 1 if es_manana else 0
 
-            # Consultar clima con caché
-            cache_key = f"weather_{ubicacion.lower()}"
+            # Consultar clima con caché (la clave debe incluir días)
+            cache_key = f"weather_{ubicacion.lower()}_{dias}"
             datos_clima = get_cached(cache_key, "weather")
             if not datos_clima:
                 try:
-                    datos_clima = await consultar_clima_open_meteo(ubicacion)
+                    datos_clima = await consultar_clima_open_meteo(ubicacion, dias=dias)
                     set_cached(cache_key, datos_clima, "weather")
-                except httpx.HTTPStatusError as e:
-                    if e.response.status_code == 429:
-                        return AssistantResponse(
-                            intent="WEATHER",
-                            response="⏳ Límite de peticiones a Open-Meteo alcanzado. Intenta de nuevo en unos minutos."
-                        )
-                    else:
-                        raise
-                except json.JSONDecodeError:
-                    return AssistantResponse(
-                        intent="WEATHER",
-                        response="⚠️ La respuesta del servicio meteorológico no tiene un formato válido."
-                    )
+                except Exception as e:
+                    # Manejo de errores específicos
+                    ...
+
+            # Si la respuesta contiene error, mostrarlo
+            if "error" in datos_clima:
+                return AssistantResponse(
+                    intent="WEATHER",
+                    response=f"⚠️ {datos_clima['error']}"
+                )
 
             # Convertir a JSON para el prompt
             datos_clima_str = json.dumps(datos_clima, ensure_ascii=False, indent=2)
 
             prompt_respuesta_clima = (
-                "Eres AI Alexis, un asistente virtual directo, inteligente y elegante (inspirado en J.A.R.V.I.S.).\n\n"
+                "Eres AI Alexis, un asistente virtual directo, inteligente y elegante.\n\n"
                 "REGLAS OBLIGATORIAS DE RESPUESTA:\n"
                 "1. Responde de forma clara y directa con los datos meteorológicos proporcionados.\n"
-                "2. NUNCA sugieras al usuario buscar en webs externas ni incluyas enlaces.\n"
+                "2. NUNCA sugieras buscar en webs externas ni incluyas enlaces.\n"
                 "3. Presenta la información en formato de lista con viñetas (*), usando negritas para los conceptos clave.\n"
                 "4. Sé natural, conversacional y conciso.\n\n"
                 f"DATOS OFICIALES OPEN-METEO (JSON):\n{datos_clima_str}\n\n"
@@ -317,7 +306,7 @@ async def procesar_mensaje_alexis(
         except Exception as e:
             return AssistantResponse(
                 intent="WEATHER",
-                response=f"No pude consultar la información meteorológica en este momento: {str(e)}"
+                response=f"No pude consultar el clima: {str(e)}"
             )
 
     # --- 2. INTENCIÓN: BÚSQUEDA UNIFICADA (NEWS + WEB) ---
