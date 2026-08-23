@@ -573,6 +573,175 @@ async def procesar_mensaje_alexis(
         )
 
 # --- ENDPOINTS ---
-# (Mantén aquí todos los endpoints que ya tenías: /history, /chat, /voice, /upload-cv, /upload-document)
-# Para no alargar, los he omitido en este bloque, pero deben estar presentes.
-# Asegúrate de que no falten.
+
+@router.get("/history/{user_id}")
+async def get_user_chat_history(user_id: str):
+    try:
+        doc = history_collection.find_one({"_id": user_id})
+        if doc and "messages" in doc:
+            return {"messages": doc["messages"]}
+        return {"messages": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al recuperar historial: {str(e)}")
+
+@router.post("/chat", response_model=AssistantResponse)
+async def handle_assistant_chat(payload: AssistantRequest):
+    # Sanitizar la API Key recibida del frontend
+    api_key = payload.groq_api_key
+    if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
+        api_key = os.getenv("GROQ_API_KEY")
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API Key de Groq no configurada en el servidor.")
+
+    user_id = payload.user_id or "guest_user"
+
+    db_profile = profiles_collection.find_one({"_id": user_id})
+    if db_profile and "cv_text" in db_profile:
+        cv_a_procesar = db_profile["cv_text"]
+    else:
+        cv_a_procesar = payload.cv_text or BASE_CV
+
+    # Inyección semántica RAG protegida
+    rag_context = ""
+    if payload.message:
+        try:
+            rag_context = vector_search(user_id=user_id, query=payload.message, limit=3)
+        except Exception as e:
+            print(f"⚠️ Error en vector_search: {e}")
+            rag_context = ""
+
+    resultado = await procesar_mensaje_alexis(
+        message=payload.message,
+        cv_texto=cv_a_procesar,
+        api_key=api_key,
+        user_id=user_id,
+        image_base64=payload.image,
+        rag_context=rag_context
+    )
+
+    texto_guardado = payload.message or "📸 [Imagen enviada]"
+    if payload.image and not payload.message:
+        texto_guardado = "📸 [Análisis de imagen]"
+
+    guardar_en_historial(user_id, texto_guardado, resultado.response, resultado.intent)
+
+    return resultado
+
+@router.post("/voice", response_model=AssistantResponse)
+async def handle_assistant_voice(
+    file: UploadFile = File(...),
+    groq_api_key: str = Form(None),
+    user_id: str = Form("guest_user"),
+    cv_text: str = Form("")
+):
+    api_key = groq_api_key or os.getenv("GROQ_API_KEY")
+    if not api_key or api_key in ["string", "null", ""]:
+        api_key = os.getenv("GROQ_API_KEY")
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
+
+    nombre_archivo_temporal = f"temp_{file.filename}"
+    try:
+        with open(nombre_archivo_temporal, "wb") as f:
+            f.write(await file.read())
+
+        with open(nombre_archivo_temporal, "rb") as audio_file:
+            transcription_response = litellm.transcription(
+                model="groq/whisper-large-v3",
+                file=audio_file,
+                api_key=api_key
+            )
+
+        os.remove(nombre_archivo_temporal)
+        texto_transcrito = transcription_response.get("text", "").strip()
+
+        if not texto_transcrito:
+            raise HTTPException(status_code=400, detail="No se pudo entender el audio.")
+
+        db_profile = profiles_collection.find_one({"_id": user_id})
+        if db_profile and "cv_text" in db_profile:
+            cv_a_procesar = db_profile["cv_text"]
+        else:
+            cv_a_procesar = cv_text or BASE_CV
+
+        # Búsqueda semántica RAG para mensajes por voz
+        rag_context = vector_search(user_id=user_id, query=texto_transcrito, limit=3)
+
+        resultado = await procesar_mensaje_alexis(
+            message=texto_transcrito,
+            cv_texto=cv_a_procesar,
+            api_key=api_key,
+            user_id=user_id,
+            rag_context=rag_context
+        )
+        respuesta_formateada = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
+
+        guardar_en_historial(user_id, f"🎙️ [Nota de voz]: {texto_transcrito}", resultado.response, resultado.intent)
+
+        resultado.response = respuesta_formateada
+        return resultado
+
+    except Exception as e:
+        if os.path.exists(nombre_archivo_temporal):
+            os.remove(nombre_archivo_temporal)
+        raise HTTPException(status_code=500, detail=f"Error al procesar la nota de voz: {str(e)}")
+
+@router.post("/upload-cv")
+async def handle_upload_cv(
+    file: UploadFile = File(...),
+    user_id: str = Form("guest_user")
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Formato de archivo inválido. Sube un documento PDF.")
+
+    try:
+        contenido = await file.read()
+        texto_extraido = extraer_texto_pdf(contenido)
+
+        if not texto_extraido:
+            raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
+
+        profiles_collection.update_one(
+            {"_id": user_id},
+            {"$set": {
+                "filename": file.filename,
+                "cv_text": texto_extraido
+            }},
+            upsert=True
+        )
+
+        return {
+            "user_id": user_id,
+            "filename": file.filename,
+            "status": "success_saved_to_atlas",
+            "extracted_text_preview": texto_extraido[:200] + "..."
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al procesar y guardar: {str(e)}")
+
+@router.post("/upload-document")
+async def upload_document(
+    file: UploadFile = File(...),
+    user_id: str = Form(...)
+):
+    try:
+        content_bytes = await file.read()
+        if file.filename.lower().endswith(".pdf"):
+            texto = extract_text_from_pdf(content_bytes)
+        else:
+            texto = content_bytes.decode("utf-8", errors="ignore")
+
+        if not texto.strip():
+            return {"status": "error", "message": "El documento está vacío o no contiene texto legible."}
+
+        num_chunks = index_document_content(user_id=user_id, filename=file.filename, text=texto)
+        return {
+            "status": "success",
+            "filename": file.filename,
+            "chunks_indexed": num_chunks,
+            "message": f"Documento indexado con éxito ({num_chunks} fragmentos vectorizados)."
+        }
+    except Exception as e:
+        return {"status": "error", "message": f"Error al procesar el documento: {str(e)}"}
