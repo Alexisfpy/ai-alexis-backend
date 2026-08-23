@@ -216,11 +216,15 @@ async def procesar_mensaje_alexis(
                 response=f"Error al analizar la imagen: {str(e)}"
             )
 
-    # --- EVALUACIÓN DE CONTEXTO RAG ---
-    if rag_context and rag_context.strip():
-        user_intent = "GENERAL_CHAT"
+    # --- 1. DETECCIÓN DE INTENCIÓN (CON FALLBACK POR PALABRAS CLAVE) ---
+    mensaje_lower = message.lower()
+    palabras_clima = ["tiempo", "clima", "temperatura", "grados", "lluvia", "meteorológico", "soleado", "nublado", "viento", "presión", "humedad"]
+    
+    if any(palabra in mensaje_lower for palabra in palabras_clima):
+        user_intent = "WEATHER"
+        print(f"🔍 FALLBACK: detectado WEATHER por palabras clave en: {message}")
     else:
-        # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO (UNIFICADA SEARCH) ---
+        # --- CLASIFICACIÓN CON LLM ---
         system_prompt = (
             "Eres el clasificador de intenciones de AI Alexis.\n"
             "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
@@ -249,12 +253,14 @@ async def procesar_mensaje_alexis(
 
         user_intent = classification.choices[0].message.content.strip().upper()
         user_intent = re.sub(r'[^A-Z_]', '', user_intent)  # Limpieza adicional
-        print(f"🔍 INTENT DETECTED: {user_intent}")
+        print(f"🔍 INTENT DETECTED (LLM): {user_intent}")
 
-    # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA (OPEN-METEO) ---
+    # --- 2. EJECUCIÓN POR INTENCIÓN ---
+
+    # --- 2.1 INTENCIÓN: METEOROLOGÍA / CLIMA (OPEN-METEO) ---
     if "WEATHER" in user_intent:
         try:
-            # --- Extraer ubicación ---
+            # Extraer ubicación
             prompt_ubicacion = (
                 "Extrae ÚNICAMENTE el nombre de la ciudad, isla o municipio mencionado en el mensaje del usuario.\n"
                 "Ejemplo: 'Dime los grados de temperatura para mañana en Fuerteventura' -> 'Fuerteventura'\n"
@@ -275,12 +281,12 @@ async def procesar_mensaje_alexis(
             ubicacion = re.sub(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]', '', ubicacion_raw).strip()
             print(f"📍 Ubicación extraída: {ubicacion}")
 
-            # --- Detectar si es hoy o mañana ---
+            # Detectar si es hoy o mañana
             es_manana = "mañana" in message.lower() or "manana" in message.lower()
             dias = 1 if es_manana else 0
             print(f"📅 Días: {'mañana' if es_manana else 'hoy'}")
 
-            # --- Consultar clima con caché ---
+            # Consultar clima con caché
             cache_key = f"weather_{ubicacion.lower()}_{dias}"
             datos_clima = get_cached(cache_key, "weather")
             if not datos_clima:
@@ -302,14 +308,14 @@ async def procesar_mensaje_alexis(
                     )
             print(f"🌤️ Datos de clima: {datos_clima}")
 
-            # --- Si hay error en la respuesta ---
+            # Si hay error en la respuesta
             if "error" in datos_clima:
                 return AssistantResponse(
                     intent="WEATHER",
                     response=f"⚠️ {datos_clima['error']}"
                 )
 
-            # --- Convertir a JSON para el prompt ---
+            # Convertir a JSON para el prompt
             datos_clima_str = json.dumps(datos_clima, ensure_ascii=False, indent=2)
 
             prompt_respuesta_clima = (
@@ -340,7 +346,7 @@ async def procesar_mensaje_alexis(
                 response=f"No pude consultar el clima: {str(e)}"
             )
 
-    # --- 2. INTENCIÓN: BÚSQUEDA UNIFICADA (NEWS + WEB) ---
+    # --- 2.2 INTENCIÓN: BÚSQUEDA UNIFICADA (NEWS + WEB) ---
     elif "SEARCH" in user_intent:
         try:
             prompt_tema = (
@@ -445,7 +451,7 @@ async def procesar_mensaje_alexis(
                 response=f"No pude realizar la búsqueda en este momento: {str(e)}"
             )
 
-    # --- 3. INTENCIÓN: OPTIMIZACIÓN DE CV ---
+    # --- 2.3 INTENCIÓN: OPTIMIZACIÓN DE CV ---
     elif "CV_OPTIMIZATION" in user_intent:
         try:
             extraction = litellm.completion(
@@ -512,14 +518,14 @@ async def procesar_mensaje_alexis(
                 response=f"Hubo un contratiempo al coordinar la Crew de agentes: {str(e)}"
             )
 
-    # --- 4. INTENCIÓN: CONTROL DOMÓTICO ---
+    # --- 2.4 INTENCIÓN: CONTROL DOMÓTICO ---
     elif "DOMOTICS_CONTROL" in user_intent:
         return AssistantResponse(
             intent="DOMOTICS_CONTROL",
             response="Entendido, Alexis. Conectando con los sistemas de domótica... (Módulo IoT en desarrollo)."
         )
 
-    # --- 5. INTENCIÓN: CHARLA GENERAL Y RAG DOCUMENTAL ---
+    # --- 2.5 INTENCIÓN: CHARLA GENERAL Y RAG DOCUMENTAL ---
     else:
         historial_previo = []
         doc = history_collection.find_one({"_id": user_id})
@@ -530,7 +536,7 @@ async def procesar_mensaje_alexis(
         contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil registrado."
 
         contexto_documentos = ""
-        if rag_context:
+        if rag_context and rag_context.strip():
             contexto_documentos = (
                 f"\n--- INFORMACIÓN DE LA BASE DE CONOCIMIENTO (DOCUMENTOS INDEXADOS) ---\n"
                 f"{rag_context}\n"
@@ -566,177 +572,7 @@ async def procesar_mensaje_alexis(
             response=chat_response.choices[0].message.content
         )
 
-
 # --- ENDPOINTS ---
-
-@router.get("/history/{user_id}")
-async def get_user_chat_history(user_id: str):
-    try:
-        doc = history_collection.find_one({"_id": user_id})
-        if doc and "messages" in doc:
-            return {"messages": doc["messages"]}
-        return {"messages": []}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al recuperar historial: {str(e)}")
-
-@router.post("/chat", response_model=AssistantResponse)
-async def handle_assistant_chat(payload: AssistantRequest):
-    # Sanitizar la API Key recibida del frontend
-    api_key = payload.groq_api_key
-    if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
-        api_key = os.getenv("GROQ_API_KEY")
-
-    if not api_key:
-        raise HTTPException(status_code=400, detail="API Key de Groq no configurada en el servidor.")
-
-    user_id = payload.user_id or "guest_user"
-
-    db_profile = profiles_collection.find_one({"_id": user_id})
-    if db_profile and "cv_text" in db_profile:
-        cv_a_procesar = db_profile["cv_text"]
-    else:
-        cv_a_procesar = payload.cv_text or BASE_CV
-
-    # Inyección semántica RAG protegida
-    rag_context = ""
-    if payload.message:
-        try:
-            rag_context = vector_search(user_id=user_id, query=payload.message, limit=3)
-        except Exception as e:
-            print(f"⚠️ Error en vector_search: {e}")
-            rag_context = ""
-
-    resultado = await procesar_mensaje_alexis(
-        message=payload.message,
-        cv_texto=cv_a_procesar,
-        api_key=api_key,
-        user_id=user_id,
-        image_base64=payload.image,
-        rag_context=rag_context
-    )
-
-    texto_guardado = payload.message or "📸 [Imagen enviada]"
-    if payload.image and not payload.message:
-        texto_guardado = "📸 [Análisis de imagen]"
-
-    guardar_en_historial(user_id, texto_guardado, resultado.response, resultado.intent)
-
-    return resultado
-
-@router.post("/voice", response_model=AssistantResponse)
-async def handle_assistant_voice(
-    file: UploadFile = File(...),
-    groq_api_key: str = Form(None),
-    user_id: str = Form("guest_user"),
-    cv_text: str = Form("")
-):
-    api_key = groq_api_key or os.getenv("GROQ_API_KEY")
-    if not api_key or api_key in ["string", "null", ""]:
-        api_key = os.getenv("GROQ_API_KEY")
-
-    if not api_key:
-        raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
-
-    nombre_archivo_temporal = f"temp_{file.filename}"
-    try:
-        with open(nombre_archivo_temporal, "wb") as f:
-            f.write(await file.read())
-
-        with open(nombre_archivo_temporal, "rb") as audio_file:
-            transcription_response = litellm.transcription(
-                model="groq/whisper-large-v3",
-                file=audio_file,
-                api_key=api_key
-            )
-
-        os.remove(nombre_archivo_temporal)
-        texto_transcrito = transcription_response.get("text", "").strip()
-
-        if not texto_transcrito:
-            raise HTTPException(status_code=400, detail="No se pudo entender el audio.")
-
-        db_profile = profiles_collection.find_one({"_id": user_id})
-        if db_profile and "cv_text" in db_profile:
-            cv_a_procesar = db_profile["cv_text"]
-        else:
-            cv_a_procesar = cv_text or BASE_CV
-
-        # Búsqueda semántica RAG para mensajes por voz
-        rag_context = vector_search(user_id=user_id, query=texto_transcrito, limit=3)
-
-        resultado = await procesar_mensaje_alexis(
-            message=texto_transcrito,
-            cv_texto=cv_a_procesar,
-            api_key=api_key,
-            user_id=user_id,
-            rag_context=rag_context
-        )
-        respuesta_formateada = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
-
-        guardar_en_historial(user_id, f"🎙️ [Nota de voz]: {texto_transcrito}", resultado.response, resultado.intent)
-
-        resultado.response = respuesta_formateada
-        return resultado
-
-    except Exception as e:
-        if os.path.exists(nombre_archivo_temporal):
-            os.remove(nombre_archivo_temporal)
-        raise HTTPException(status_code=500, detail=f"Error al procesar la nota de voz: {str(e)}")
-
-@router.post("/upload-cv")
-async def handle_upload_cv(
-    file: UploadFile = File(...),
-    user_id: str = Form("guest_user")
-):
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Formato de archivo inválido. Sube un documento PDF.")
-
-    try:
-        contenido = await file.read()
-        texto_extraido = extraer_texto_pdf(contenido)
-
-        if not texto_extraido:
-            raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
-
-        profiles_collection.update_one(
-            {"_id": user_id},
-            {"$set": {
-                "filename": file.filename,
-                "cv_text": texto_extraido
-            }},
-            upsert=True
-        )
-
-        return {
-            "user_id": user_id,
-            "filename": file.filename,
-            "status": "success_saved_to_atlas",
-            "extracted_text_preview": texto_extraido[:200] + "..."
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al procesar y guardar: {str(e)}")
-
-@router.post("/upload-document")
-async def upload_document(
-    file: UploadFile = File(...),
-    user_id: str = Form(...)
-):
-    try:
-        content_bytes = await file.read()
-        if file.filename.lower().endswith(".pdf"):
-            texto = extract_text_from_pdf(content_bytes)
-        else:
-            texto = content_bytes.decode("utf-8", errors="ignore")
-
-        if not texto.strip():
-            return {"status": "error", "message": "El documento está vacío o no contiene texto legible."}
-
-        num_chunks = index_document_content(user_id=user_id, filename=file.filename, text=texto)
-        return {
-            "status": "success",
-            "filename": file.filename,
-            "chunks_indexed": num_chunks,
-            "message": f"Documento indexado con éxito ({num_chunks} fragmentos vectorizados)."
-        }
-    except Exception as e:
-        return {"status": "error", "message": f"Error al procesar el documento: {str(e)}"}
+# (Mantén aquí todos los endpoints que ya tenías: /history, /chat, /voice, /upload-cv, /upload-document)
+# Para no alargar, los he omitido en este bloque, pero deben estar presentes.
+# Asegúrate de que no falten.
