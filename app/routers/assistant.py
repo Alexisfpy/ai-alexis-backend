@@ -2,6 +2,10 @@ import os
 import io
 import litellm
 import re
+import json
+import time
+from typing import Optional, Any
+import httpx
 from litellm import completion
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form
 from app.schemas.assistant import AssistantRequest, AssistantResponse
@@ -11,16 +15,17 @@ from pypdf import PdfReader
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from pathlib import Path
-from app.services.weather_service import obtener_clima_open_meteo
+from app.services.weather_service import obtener_clima_open_meteo, consultar_clima_open_meteo
 from tavily import TavilyClient
 from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
 import base64
 from google import genai
 from google.genai import types
+from app.services.news_service import buscar_noticias
 
 # --- CONFIGURACIÓN DE MODELOS ---
-TEXT_MODEL = "groq/openai/gpt-oss-120b" # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
-VISION_MODEL = "gemini-3.6-flash" # Google AI (Visión y análisis de imágenes)
+TEXT_MODEL = "groq/openai/gpt-oss-120b"  # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
+VISION_MODEL = "gemini-3.6-flash"        # Google AI (Visión y análisis de imágenes)
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -40,6 +45,26 @@ db = client["ai_alexis_db"]
 profiles_collection = db["profiles"]
 history_collection = db["chat_history"]
 
+# --- CACHÉ SIMPLE CON TTL ---
+_cache = {}
+CACHE_TTL = {
+    "weather": 600,   # 10 minutos
+    "news": 300,      # 5 minutos
+    "web": 1800       # 30 minutos
+}
+
+def get_cached(key: str, cache_type: str) -> Optional[Any]:
+    """Obtiene un valor de la caché si no ha expirado."""
+    if key in _cache:
+        data, timestamp = _cache[key]
+        if time.time() - timestamp < CACHE_TTL.get(cache_type, 300):
+            return data
+        else:
+            del _cache[key]
+    return None
+
+def set_cached(key: str, value: Any, cache_type: str):
+    _cache[key] = (value, time.time())
 
 # --- HELPER: GUARDAR MENSAJES EN MONGO ATLAS ---
 def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent: str):
@@ -61,7 +86,6 @@ def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent
     except Exception as e:
         print(f"⚠️ Error guardando historial en Atlas: {e}")
 
-
 # --- PERFIL PROFESIONAL BASE ---
 BASE_CV = """
 Nombre Completo: Alexis Fernando Pérez Yamasque
@@ -69,7 +93,6 @@ Ubicación: Vigo, Galicia
 Perfil Profesional: 
 Ingeniero de IA y Estudiante de Big Data con sólida formación en desarrollo multiplataforma y administración de sistemas. Especializado en el diseño, entrenamiento y despliegue de modelos de Machine Learning y Deep Learning.
 """
-
 
 # --- UTILERÍA: EXTRACTOR DE TEXTO DE PDF ---
 def extraer_texto_pdf(contenido_bytes: bytes) -> str:
@@ -84,7 +107,6 @@ def extraer_texto_pdf(contenido_bytes: bytes) -> str:
         return texto.strip()
     except Exception as e:
         raise Exception(f"No se pudo decodificar el PDF: {str(e)}")
-
 
 # --- OPTIMIZADOR INTELIGENTE DE BÚSQUEDAS ---
 def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
@@ -109,7 +131,6 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
         return query_limpia
     except Exception:
         return mensaje_usuario
-
 
 # --- EJECUTOR DE BÚSQUEDAS EN TIEMPO REAL ---
 def buscar_en_internet(query: str) -> str:
@@ -144,12 +165,11 @@ def buscar_en_internet(query: str) -> str:
 
     return "No se encontraron resultados actualizados en la web."
 
-
 # --- PROCESADOR CENTRAL DE INTENCIONES ---
 async def procesar_mensaje_alexis(
-    message: str, 
-    cv_texto: str, 
-    api_key: str, 
+    message: str,
+    cv_texto: str,
+    api_key: str,
     user_id: str = "guest_user",
     image_base64: str = None,
     rag_context: str = ""
@@ -197,19 +217,18 @@ async def procesar_mensaje_alexis(
             )
 
     # --- EVALUACIÓN DE CONTEXTO RAG ---
-    # Si la búsqueda vectorial encontró coincidencias en los documentos, priorizamos respuesta documental
     if rag_context and rag_context.strip():
         user_intent = "GENERAL_CHAT"
     else:
-        # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO ---
+        # --- CLASIFICACIÓN DE INTENCIÓN DE TEXTO (UNIFICADA SEARCH) ---
         system_prompt = (
             "Eres el clasificador de intenciones de AI Alexis.\n"
             "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
             "- 'WEATHER' (si pregunta por el tiempo, clima, temperatura, grados, predicción meteorológica o lluvia)\n"
+            "- 'SEARCH' (si pide noticias, titulares, información de actualidad, búsquedas web generales, resultados deportivos o eventos en tiempo real)\n"
             "- 'CV_OPTIMIZATION' (si quiere adaptar su CV, currículum o habla de ofertas de empleo)\n"
             "- 'DOMOTICS_CONTROL' (si habla de controlar luces, sensores, domótica o IoT)\n"
-            "- 'WEB_SEARCH' (noticias, resultados deportivos, eventos o datos en tiempo real que NO sean el clima)\n"
-            "- 'GENERAL_CHAT' (para saludos, charla casual, dudas generales o programación)\n\n"
+            "- 'GENERAL_CHAT' (para saludos, charla casual, dudas generales, programación o análisis de documentos)\n\n"
             "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas, sin comillas, introducciones ni explicaciones."
         )
 
@@ -224,16 +243,16 @@ async def procesar_mensaje_alexis(
         )
 
         user_intent = classification.choices[0].message.content.strip().upper()
-        user_intent = user_intent.replace("'", "").replace('"', "").replace(".", "").strip()
+        user_intent = re.sub(r'[^A-Z_]', '', user_intent)  # Limpieza adicional
 
-    # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA ---
+    # --- 1. INTENCIÓN: METEOROLOGÍA / CLIMA (OPEN-METEO) ---
     if "WEATHER" in user_intent:
         try:
             prompt_ubicacion = (
                 "Extrae ÚNICAMENTE el nombre de la ciudad, isla o municipio mencionado en el mensaje del usuario.\n"
                 "Ejemplo: 'Dime los grados de temperatura para mañana en Fuerteventura' -> 'Fuerteventura'\n"
                 "Ejemplo: '¿Va a llover en Sevilla hoy?' -> 'Sevilla'\n"
-                "Si no detectas ninguna ubicación explícita, responde 'Fuerteventura'.\n"
+                "Si no detectas ninguna ubicación explícita, responde 'Vigo'.\n"
                 "REGLA ESTRICTA: Responde SOLO con el nombre de la ubicación sin comillas ni signos."
             )
             res_loc = litellm.completion(
@@ -245,28 +264,42 @@ async def procesar_mensaje_alexis(
                 ],
                 temperature=0.0
             )
-            ubicacion = res_loc.choices[0].message.content.strip().replace('"', '').replace("'", "")
-            
-            datos_clima = await obtener_clima_open_meteo(ubicacion)
+            ubicacion_raw = res_loc.choices[0].message.content.strip()
+            # Validación con regex: solo letras, espacios y acentos
+            ubicacion = re.sub(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]', '', ubicacion_raw).strip()
 
-            if datos_clima:
-                contexto_clima = (
-                    f"DATOS CLIMÁTICOS OFICIALES EN TIEMPO REAL PARA {datos_clima['ubicacion']}:\n"
-                    f"- HOY: Temp. Máxima {datos_clima['hoy']['max']}°C, Temp. Mínima {datos_clima['hoy']['min']}°C, Probabilidad de lluvia {datos_clima['hoy']['prob_lluvia']}%\n"
-                    f"- MAÑANA: Temp. Máxima {datos_clima['manana']['max']}°C, Temp. Mínima {datos_clima['manana']['min']}°C, Probabilidad de lluvia {datos_clima['manana']['prob_lluvia']}%\n"
-                )
-            else:
-                contexto_clima = f"No se han podido consultar los datos automáticos para la ubicación {ubicacion}."
+            # Consultar clima con caché
+            cache_key = f"weather_{ubicacion.lower()}"
+            datos_clima = get_cached(cache_key, "weather")
+            if not datos_clima:
+                try:
+                    datos_clima = await consultar_clima_open_meteo(ubicacion)
+                    set_cached(cache_key, datos_clima, "weather")
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code == 429:
+                        return AssistantResponse(
+                            intent="WEATHER",
+                            response="⏳ Límite de peticiones a Open-Meteo alcanzado. Intenta de nuevo en unos minutos."
+                        )
+                    else:
+                        raise
+                except json.JSONDecodeError:
+                    return AssistantResponse(
+                        intent="WEATHER",
+                        response="⚠️ La respuesta del servicio meteorológico no tiene un formato válido."
+                    )
+
+            # Convertir a JSON para el prompt
+            datos_clima_str = json.dumps(datos_clima, ensure_ascii=False, indent=2)
 
             prompt_respuesta_clima = (
                 "Eres AI Alexis, un asistente virtual directo, inteligente y elegante (inspirado en J.A.R.V.I.S.).\n\n"
                 "REGLAS OBLIGATORIAS DE RESPUESTA:\n"
-                "1. Responde de forma clara y directa con las temperaturas exactas en °C (máxima y mínima) y la probabilidad de lluvia.\n"
-                "2. Si la consulta menciona 'mañana', prioriza dar los datos del pronóstico de mañana.\n"
-                "3. NUNCA sugieras al usuario buscar en webs externas ni le expliques cómo usar un buscador.\n"
-                "4. NUNCA incluyas enlaces, URLs ni corchetes [1], [2] de fuentes de internet.\n"
-                "5. Sé natural, conversacional y conciso.\n\n"
-                f"{contexto_clima}\n\n"
+                "1. Responde de forma clara y directa con los datos meteorológicos proporcionados.\n"
+                "2. NUNCA sugieras al usuario buscar en webs externas ni incluyas enlaces.\n"
+                "3. Presenta la información en formato de lista con viñetas (*), usando negritas para los conceptos clave.\n"
+                "4. Sé natural, conversacional y conciso.\n\n"
+                f"DATOS OFICIALES OPEN-METEO (JSON):\n{datos_clima_str}\n\n"
                 f"Consulta del usuario: {message}"
             )
 
@@ -287,7 +320,112 @@ async def procesar_mensaje_alexis(
                 response=f"No pude consultar la información meteorológica en este momento: {str(e)}"
             )
 
-    # --- 2. INTENCIÓN: OPTIMIZACIÓN DE CV ---
+    # --- 2. INTENCIÓN: BÚSQUEDA UNIFICADA (NEWS + WEB) ---
+    elif "SEARCH" in user_intent:
+        try:
+            prompt_tema = (
+                "Extrae el tema, personaje, país o sector sobre el que el usuario quiere buscar información.\n"
+                "Ejemplo: '¿Cuáles son las últimas noticias de OpenAI?' -> 'OpenAI'\n"
+                "Ejemplo: 'Dame los titulares de hoy en España' -> 'actualidad'\n"
+                "Ejemplo: '¿Quién ganó el partido de ayer?' -> 'resultado partido'\n"
+                "Si es una consulta general sin temática concreta, responde 'actualidad'.\n"
+                "REGLA ESTRICTA: Responde SOLO con la palabra o término clave, sin comillas ni explicaciones."
+            )
+            res_tema = litellm.completion(
+                model=TEXT_MODEL,
+                api_key=api_key,
+                messages=[
+                    {"role": "system", "content": prompt_tema},
+                    {"role": "user", "content": message}
+                ],
+                temperature=0.0
+            )
+            tema_raw = res_tema.choices[0].message.content.strip()
+            tema = re.sub(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑ0-9\s]', '', tema_raw).strip()
+
+            # Decidir si es noticias o búsqueda general basado en palabras clave
+            palabras_clave_noticias = ["noticia", "titular", "periódico", "actualidad", "última hora", "información", "evento", "partido"]
+            es_noticias = any(palabra in message.lower() for palabra in palabras_clave_noticias)
+
+            if es_noticias:
+                # --- BÚSQUEDA DE NOTICIAS (NewsAPI) ---
+                cache_key = f"news_{tema.lower()}"
+                noticias_raw = get_cached(cache_key, "news")
+                if not noticias_raw:
+                    try:
+                        noticias_raw = await buscar_noticias(query=tema)
+                        set_cached(cache_key, noticias_raw, "news")
+                    except httpx.HTTPStatusError as e:
+                        if e.response.status_code == 429:
+                            return AssistantResponse(
+                                intent="SEARCH",
+                                response="⏳ Límite de peticiones a NewsAPI alcanzado. Intenta de nuevo en unos minutos."
+                            )
+                        elif e.response.status_code == 404:
+                            return AssistantResponse(
+                                intent="SEARCH",
+                                response="No se encontraron noticias para ese tema."
+                            )
+                        else:
+                            raise
+                    except json.JSONDecodeError:
+                        return AssistantResponse(
+                            intent="SEARCH",
+                            response="⚠️ La respuesta del servicio de noticias no tiene un formato válido."
+                        )
+
+                prompt_respuesta = (
+                    "Eres AI Alexis, un asistente informativo de alta precisión (inspirado en J.A.R.V.I.S.).\n"
+                    "Presenta los titulares de forma estructurada:\n"
+                    "- Usa viñetas (*) para cada noticia.\n"
+                    "- Incluye el nombre de la fuente entre paréntesis.\n"
+                    "- Si hay enlace, añade ' [Leer más](url)'.\n"
+                    "- Usa negritas para los temas principales.\n"
+                    "Sé ejecutivo, claro y neutral.\n\n"
+                    f"TITULARES RECUPERADOS:\n{noticias_raw}\n\n"
+                    f"Consulta del usuario: {message}"
+                )
+            else:
+                # --- BÚSQUEDA WEB GENERAL (Tavily / DuckDuckGo) ---
+                query_optima = optimizar_query_busqueda(message, api_key)
+                cache_key = f"web_{query_optima.lower()}"
+                contexto_web = get_cached(cache_key, "web")
+                if not contexto_web:
+                    contexto_web = buscar_en_internet(query_optima)
+                    set_cached(cache_key, contexto_web, "web")
+
+                prompt_respuesta = (
+                    f"Eres AI Alexis, un asistente de inteligencia artificial leal, directo e inteligente (inspirado en J.A.R.V.I.S.).\n"
+                    f"FECHA ACTUAL DEL SISTEMA: Año 2026.\n\n"
+                    f"Usa la siguiente información extraída de internet para responder a la pregunta del usuario.\n"
+                    f"REGLAS:\n"
+                    f"1. Responde de forma clara, directa y precisa basándote en los datos web.\n"
+                    f"2. Presenta la información en formato de lista con viñetas (*), usando negritas para los conceptos clave.\n"
+                    f"3. NUNCA digas que no tienes información si los datos web la contienen.\n"
+                    f"4. NUNCA le pidas al usuario que navegue en la web por su cuenta ni incluyas URLs o corchetes de fuentes [1].\n\n"
+                    f"--- INFORMACIÓN RECUPERADA DE INTERNET ---\n"
+                    f"{contexto_web}\n"
+                    f"------------------------------------------\n\n"
+                    f"Consulta del usuario: {message}"
+                )
+
+            chat_response = litellm.completion(
+                model=TEXT_MODEL,
+                api_key=api_key,
+                messages=[{"role": "user", "content": prompt_respuesta}]
+            )
+            return AssistantResponse(
+                intent="SEARCH",
+                response=chat_response.choices[0].message.content
+            )
+
+        except Exception as e:
+            return AssistantResponse(
+                intent="SEARCH",
+                response=f"No pude realizar la búsqueda en este momento: {str(e)}"
+            )
+
+    # --- 3. INTENCIÓN: OPTIMIZACIÓN DE CV ---
     elif "CV_OPTIMIZATION" in user_intent:
         try:
             extraction = litellm.completion(
@@ -302,7 +440,7 @@ async def procesar_mensaje_alexis(
             oferta_laboral = extraction.choices[0].message.content.strip()
 
             llm_groq = LLM(
-                model=TEXT_MODEL,  
+                model=TEXT_MODEL,
                 api_key=api_key
             )
 
@@ -348,49 +486,19 @@ async def procesar_mensaje_alexis(
                 intent="CV_OPTIMIZATION",
                 response=f"He activado a mis agentes de selección en segundo plano. Analicé la oferta y reestructuré el perfil profesional con éxito.\n\nAquí tienes el resultado de la optimización:\n\n{str(cv_optimizado)}"
             )
-            
         except Exception as e:
             return AssistantResponse(
                 intent="CV_OPTIMIZATION",
                 response=f"Hubo un contratiempo al coordinar la Crew de agentes: {str(e)}"
             )
-        
-    # --- 3. INTENCIÓN: CONTROL DOMÓTICO ---
+
+    # --- 4. INTENCIÓN: CONTROL DOMÓTICO ---
     elif "DOMOTICS_CONTROL" in user_intent:
         return AssistantResponse(
             intent="DOMOTICS_CONTROL",
             response="Entendido, Alexis. Conectando con los sistemas de domótica... (Módulo IoT en desarrollo)."
         )
-        
-    # --- 4. INTENCIÓN: BÚSQUEDA WEB GENERAL ---
-    elif "WEB_SEARCH" in user_intent:
-        query_optima = optimizar_query_busqueda(message, api_key)
-        contexto_web = buscar_en_internet(query_optima)
-        
-        prompt_final = (
-            f"Eres AI Alexis, un asistente de inteligencia artificial leal, directo e inteligente (inspirado en J.A.R.V.I.S.).\n"
-            f"FECHA ACTUAL DEL SISTEMA: Año 2026.\n\n"
-            f"Usa la siguiente información extraída de internet para responder a la pregunta del usuario.\n"
-            f"REGLAS:\n"
-            f"1. Responde de forma clara, directa y precisa basándote en los datos web.\n"
-            f"2. NUNCA digas que no tienes información si los datos web la contienen.\n"
-            f"3. NUNCA le pidas al usuario que navegue en la web por su cuenta ni incluyas URLs o corchetes de fuentes [1].\n\n"
-            f"--- INFORMACIÓN RECUPERADA DE INTERNET ---\n"
-            f"{contexto_web}\n"
-            f"------------------------------------------\n\n"
-            f"Consulta del usuario: {message}"
-        )
-        
-        chat_response = litellm.completion(
-            model=TEXT_MODEL,
-            api_key=api_key,
-            messages=[{"role": "user", "content": prompt_final}]
-        )
-        return AssistantResponse(
-            intent="WEB_SEARCH",
-            response=chat_response.choices[0].message.content
-        )
-        
+
     # --- 5. INTENCIÓN: CHARLA GENERAL Y RAG DOCUMENTAL ---
     else:
         historial_previo = []
@@ -400,8 +508,7 @@ async def procesar_mensaje_alexis(
                 historial_previo.append({"role": m["role"], "content": m["content"]})
 
         contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil registrado."
-        
-        # Inyección semántica de la base de conocimiento (RAG)
+
         contexto_documentos = ""
         if rag_context:
             contexto_documentos = (
@@ -426,7 +533,7 @@ async def procesar_mensaje_alexis(
                 f"4. Responde siempre de forma clara, concisa y en español."
             )
         }
-        
+
         mensajes_para_llm = [prompt_sistema] + historial_previo + [{"role": "user", "content": message}]
 
         chat_response = litellm.completion(
@@ -452,7 +559,6 @@ async def get_user_chat_history(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al recuperar historial: {str(e)}")
 
-
 @router.post("/chat", response_model=AssistantResponse)
 async def handle_assistant_chat(payload: AssistantRequest):
     # Sanitizar la API Key recibida del frontend
@@ -462,9 +568,9 @@ async def handle_assistant_chat(payload: AssistantRequest):
 
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada en el servidor.")
-    
+
     user_id = payload.user_id or "guest_user"
-    
+
     db_profile = profiles_collection.find_one({"_id": user_id})
     if db_profile and "cv_text" in db_profile:
         cv_a_procesar = db_profile["cv_text"]
@@ -479,11 +585,11 @@ async def handle_assistant_chat(payload: AssistantRequest):
         except Exception as e:
             print(f"⚠️ Error en vector_search: {e}")
             rag_context = ""
-        
+
     resultado = await procesar_mensaje_alexis(
-        message=payload.message, 
-        cv_texto=cv_a_procesar, 
-        api_key=api_key, 
+        message=payload.message,
+        cv_texto=cv_a_procesar,
+        api_key=api_key,
         user_id=user_id,
         image_base64=payload.image,
         rag_context=rag_context
@@ -497,10 +603,9 @@ async def handle_assistant_chat(payload: AssistantRequest):
 
     return resultado
 
-
 @router.post("/voice", response_model=AssistantResponse)
 async def handle_assistant_voice(
-    file: UploadFile = File(...), 
+    file: UploadFile = File(...),
     groq_api_key: str = Form(None),
     user_id: str = Form("guest_user"),
     cv_text: str = Form("")
@@ -508,7 +613,7 @@ async def handle_assistant_voice(
     api_key = groq_api_key or os.getenv("GROQ_API_KEY")
     if not api_key or api_key in ["string", "null", ""]:
         api_key = os.getenv("GROQ_API_KEY")
-        
+
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
 
@@ -526,7 +631,7 @@ async def handle_assistant_voice(
 
         os.remove(nombre_archivo_temporal)
         texto_transcrito = transcription_response.get("text", "").strip()
-        
+
         if not texto_transcrito:
             raise HTTPException(status_code=400, detail="No se pudo entender el audio.")
 
@@ -540,14 +645,14 @@ async def handle_assistant_voice(
         rag_context = vector_search(user_id=user_id, query=texto_transcrito, limit=3)
 
         resultado = await procesar_mensaje_alexis(
-            message=texto_transcrito, 
-            cv_texto=cv_a_procesar, 
-            api_key=api_key, 
+            message=texto_transcrito,
+            cv_texto=cv_a_procesar,
+            api_key=api_key,
             user_id=user_id,
             rag_context=rag_context
         )
         respuesta_formateada = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
-        
+
         guardar_en_historial(user_id, f"🎙️ [Nota de voz]: {texto_transcrito}", resultado.response, resultado.intent)
 
         resultado.response = respuesta_formateada
@@ -558,7 +663,6 @@ async def handle_assistant_voice(
             os.remove(nombre_archivo_temporal)
         raise HTTPException(status_code=500, detail=f"Error al procesar la nota de voz: {str(e)}")
 
-
 @router.post("/upload-cv")
 async def handle_upload_cv(
     file: UploadFile = File(...),
@@ -566,14 +670,14 @@ async def handle_upload_cv(
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Formato de archivo inválido. Sube un documento PDF.")
-    
+
     try:
         contenido = await file.read()
         texto_extraido = extraer_texto_pdf(contenido)
-        
+
         if not texto_extraido:
             raise HTTPException(status_code=400, detail="No se pudo extraer texto del PDF.")
-        
+
         profiles_collection.update_one(
             {"_id": user_id},
             {"$set": {
@@ -582,7 +686,7 @@ async def handle_upload_cv(
             }},
             upsert=True
         )
-        
+
         return {
             "user_id": user_id,
             "filename": file.filename,
