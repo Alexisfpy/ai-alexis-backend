@@ -22,6 +22,8 @@ import base64
 from google import genai
 from google.genai import types
 from app.services.news_service import buscar_noticias
+import uuid
+from datetime import datetime
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "groq/openai/gpt-oss-120b"  # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
@@ -85,6 +87,39 @@ def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent
         )
     except Exception as e:
         print(f"⚠️ Error guardando historial en Atlas: {e}")
+
+# COLECCION DEDICADA A MULTIPLES SESIONES
+conversations_collection = db["conversations"]
+
+# --- HELPER: GUARDAR / CREAR SESIÓN DE CHAT ---
+def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, bot_response: str, intent: str) -> str:
+    if not conversation_id:
+        conversation_id = str(uuid.uuid4())
+    
+    # Generar título inicial a partir del primer mensaje
+    titulo = user_text[:30] + ("..." if len(user_text) > 30 else "")
+    
+    conversations_collection.update_one(
+        {"_id": conversation_id},
+        {
+            "$setOnInsert": {
+                "user_id": user_id,
+                "title": titulo,
+                "created_at": datetime.utcnow()
+            },
+            "$set": {"updated_at": datetime.utcnow()},
+            "$push": {
+                "messages": {
+                    "$each": [
+                        {"role": "user", "content": user_text},
+                        {"role": "assistant", "content": bot_response, "intent": intent}
+                    ]
+                }
+            }
+        },
+        upsert=True
+    )
+    return conversation_id
 
 # --- PERFIL PROFESIONAL BASE ---
 BASE_CV = """
@@ -586,7 +621,6 @@ async def get_user_chat_history(user_id: str):
 
 @router.post("/chat", response_model=AssistantResponse)
 async def handle_assistant_chat(payload: AssistantRequest):
-    # Sanitizar la API Key recibida del frontend
     api_key = payload.groq_api_key
     if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
         api_key = os.getenv("GROQ_API_KEY")
@@ -596,20 +630,16 @@ async def handle_assistant_chat(payload: AssistantRequest):
 
     user_id = payload.user_id or "guest_user"
 
-    db_profile = profiles_collection.find_one({"_id": user_id})
-    if db_profile and "cv_text" in db_profile:
-        cv_a_procesar = db_profile["cv_text"]
-    else:
-        cv_a_procesar = payload.cv_text or BASE_CV
-
-    # Inyección semántica RAG protegida
+    # Contexto RAG
     rag_context = ""
     if payload.message:
         try:
             rag_context = vector_search(user_id=user_id, query=payload.message, limit=3)
         except Exception as e:
-            print(f"⚠️ Error en vector_search: {e}")
             rag_context = ""
+
+    db_profile = profiles_collection.find_one({"_id": user_id})
+    cv_a_procesar = db_profile.get("cv_text", BASE_CV) if db_profile else BASE_CV
 
     resultado = await procesar_mensaje_alexis(
         message=payload.message,
@@ -621,11 +651,17 @@ async def handle_assistant_chat(payload: AssistantRequest):
     )
 
     texto_guardado = payload.message or "📸 [Imagen enviada]"
-    if payload.image and not payload.message:
-        texto_guardado = "📸 [Análisis de imagen]"
+    
+    # Persistencia en la sesión correspondiente
+    conv_id = guardar_en_conversacion(
+        user_id=user_id,
+        conversation_id=payload.conversation_id,
+        user_text=texto_guardado,
+        bot_response=resultado.response,
+        intent=resultado.intent
+    )
 
-    guardar_en_historial(user_id, texto_guardado, resultado.response, resultado.intent)
-
+    resultado.conversation_id = conv_id
     return resultado
 
 @router.post("/voice", response_model=AssistantResponse)
@@ -745,3 +781,40 @@ async def upload_document(
         }
     except Exception as e:
         return {"status": "error", "message": f"Error al procesar el documento: {str(e)}"}
+
+
+# --- ENDPOINTS DE GESTIÓN DE SESIONES ---
+
+@router.get("/conversations/{user_id}")
+async def get_user_conversations(user_id: str):
+    """Devuelve la lista de todos los chats del usuario ordenados por fecha."""
+    try:
+        cursor = conversations_collection.find(
+            {"user_id": user_id},
+            {"_id": 1, "title": 1, "updated_at": 1}
+        ).sort("updated_at", -1)
+        
+        chats = [{"id": str(c["_id"]), "title": c.get("title", "Conversación"), "updated_at": c.get("updated_at")} for c in cursor]
+        return {"conversations": chats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar conversaciones: {str(e)}")
+
+@router.get("/conversation/{conversation_id}")
+async def get_conversation_messages(conversation_id: str):
+    """Devuelve los mensajes de una conversación específica."""
+    try:
+        doc = conversations_collection.find_one({"_id": conversation_id})
+        if doc and "messages" in doc:
+            return {"messages": doc["messages"]}
+        return {"messages": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener mensajes: {str(e)}")
+
+@router.delete("/conversation/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """Elimina una conversación."""
+    try:
+        conversations_collection.delete_one({"_id": conversation_id})
+        return {"status": "deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar conversación: {str(e)}")
