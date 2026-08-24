@@ -61,7 +61,7 @@
 ### **Backend**
 * **Framework:** FastAPI (Python).
 * **Modelos de Inferencia (Groq / LiteLLM):**
-  * **Texto, Clasificación y Chat:** `openai/llama-3.3-70b-versatile` (vía Groq API).
+  * **Texto, Clasificación y Chat:** `groq/openai/gpt-oss-120b` (vía Groq API).
   * **Visión Multimodal (OCR & Análisis de Imágenes):** Modelo de visión activo (vía Groq API).
   * **Voz a Texto:** `groq/whisper-large-v3`.
 * **Pipeline RAG & Búsqueda Vectorial:**
@@ -167,7 +167,7 @@ NEXT_PUBLIC_API_URL=[https://ai-alexis-backend.onrender.com/api/v1](https://ai-a
 
 * 🔐 **Autenticación:** Clerk (Google / Email).
 * 🧠 **Memoria Persistente & RAG:** MongoDB Atlas Cloud (colecciones `chat_history`, `profiles` y `knowledge_base` con Atlas Vector Search).
-* ⚡ **Inferencia LLM:** Groq (`llama-3.3-70b-versatile`).
+* ⚡ **Inferencia LLM:** Groq (`groq/openai/gpt-oss-120b`).
 * 📊 **Vectorización: FastEmbed (`BAAI/bge-small-en-v1.5`, 384 dimensiones).**
 * 🌐 **Búsqueda Web en Tiempo Real:** Tavily Search API.
 * 🎙️ **Transcripción de Voz:** Whisper Large v3.
