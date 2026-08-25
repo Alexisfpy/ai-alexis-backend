@@ -8,6 +8,7 @@ dependencies = [
     "crewai>=1.15.2",
     "ddgs>=9.14.4",
     "duckduckgo-search>=8.1.1",
+    "edge-tts>=7.2.8",
     "fastapi>=0.139.0",
     "google-genai>=2.18.1",
     "langchain-groq>=1.1.3",

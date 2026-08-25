@@ -24,6 +24,9 @@ from google.genai import types
 from app.services.news_service import buscar_noticias
 import uuid
 from datetime import datetime
+from fastapi.responses import Response
+from pydantic import BaseModel
+from app.services.tts_service import sintetizar_voz_neural
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "groq/openai/gpt-oss-120b"  # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
@@ -818,3 +821,17 @@ async def delete_conversation(conversation_id: str):
         return {"status": "deleted"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al eliminar conversación: {str(e)}")
+
+# --- ENDPOINTS Audio en streaming/binario ---
+class TTSRequest(BaseModel):
+    text: str
+    voice: Optional[str] = "es-ES-AlvaroNeural"
+
+@router.post("/tts")
+async def generar_audio_tts(payload: TTSRequest):
+    """Genera audio MP3 neural a partir de un texto."""
+    try:
+        audio_bytes = await sintetizar_voz_neural(payload.text, voice=payload.voice or "es-ES-AlvaroNeural")
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error generando audio TTS: {str(e)}")
