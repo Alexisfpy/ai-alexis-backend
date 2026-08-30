@@ -34,7 +34,6 @@ from app.services.tts_service import sintetizar_voz_neural
 TEXT_MODEL = "groq/openai/gpt-oss-120b"
 VISION_MODEL = "gemini-3.6-flash"
 
-# RUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
 ruta_env = ruta_raiz / ".env"
 load_dotenv(dotenv_path=ruta_env)
@@ -72,6 +71,43 @@ def get_cached(key: str, cache_type: str) -> Optional[Any]:
 def set_cached(key: str, value: Any, cache_type: str):
     _cache[key] = (value, time.time())
 
+# --- GENERADOR DE TÍTULOS INTELIGENTES ---
+async def generar_titulo_inteligente(user_text: str, api_key: str = None) -> str:
+    """Genera un título descriptivo y conciso de 2 a 4 palabras."""
+    if not user_text or not user_text.strip():
+        return "Nueva Conversación"
+
+    texto_limpio = user_text.strip()
+
+    if api_key:
+        try:
+            prompt = (
+                "Genera un título corto y representativo de 2 a 4 palabras en español para esta consulta.\n"
+                "REGLA ESTRICTA: Devuelve ÚNICAMENTE el título generado, sin comillas, sin puntos y sin introducciones.\n\n"
+                f"Consulta: {texto_limpio[:200]}"
+            )
+            res = await litellm.acompletion(
+                model=TEXT_MODEL,
+                api_key=api_key,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                max_tokens=15
+            )
+            titulo = res.choices[0].message.content.strip().replace('"', '').replace("'", "").replace(".", "")
+            titulo = titulo.split("\n")[0].strip()
+            if titulo and len(titulo) >= 3 and len(titulo) <= 35:
+                return titulo
+        except Exception as e:
+            print(f"⚠️ Error generando título con LLM: {e}")
+
+    # Fallback inteligente eliminando palabras vacías comunes
+    stopwords = {"dame", "dime", "explicame", "explícame", "quiero", "saber", "como", "cómo", "funciona", "el", "la", "los", "las", "un", "una", "de", "del", "en", "para", "por", "que", "qué", "sobre", "🎙️", "📸"}
+    palabras = [p for p in re.sub(r'[^\w\s]', '', texto_limpio).split() if p.lower() not in stopwords]
+    if palabras:
+        return " ".join(palabras[:4]).title()
+
+    return texto_limpio[:25].title()
+
 # --- HELPERS: HISTORIALES Y SESIONES ---
 def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent: str):
     try:
@@ -92,67 +128,41 @@ def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent
     except Exception as e:
         print(f"⚠️ Error guardando en chat_history: {e}")
 
-def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, bot_response: str, intent: str) -> str:
+def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, bot_response: str, intent: str, title: str = None) -> str:
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
 
-    titulo_inicial = user_text[:30] + ("..." if len(user_text) > 30 else "")
+    update_query = {
+        "$set": {"updated_at": datetime.utcnow()},
+        "$push": {
+            "messages": {
+                "$each": [
+                    {"role": "user", "content": user_text},
+                    {"role": "assistant", "content": bot_response, "intent": intent}
+                ]
+            }
+        }
+    }
+
+    set_on_insert = {
+        "user_id": user_id,
+        "created_at": datetime.utcnow()
+    }
+
+    if title:
+        update_query["$set"]["title"] = title
+    else:
+        set_on_insert["title"] = user_text[:30] + ("..." if len(user_text) > 30 else "")
+
+    update_query["$setOnInsert"] = set_on_insert
 
     conversations_collection.update_one(
         {"_id": conversation_id},
-        {
-            "$setOnInsert": {
-                "user_id": user_id,
-                "title": titulo_inicial,
-                "created_at": datetime.utcnow()
-            },
-            "$set": {"updated_at": datetime.utcnow()},
-            "$push": {
-                "messages": {
-                    "$each": [
-                        {"role": "user", "content": user_text},
-                        {"role": "assistant", "content": bot_response, "intent": intent}
-                    ]
-                }
-            }
-        },
+        update_query,
         upsert=True
     )
     return conversation_id
 
-async def generar_titulo_inteligente(user_text: str, bot_response: str, api_key: str) -> str:
-    """Genera un título descriptivo y conciso de 3 a 5 palabras mediante el LLM."""
-    if not user_text or not user_text.strip():
-        return "Nueva Conversación"
-
-    try:
-        prompt = (
-            "Eres un generador de títulos ultra-concisos.\n"
-            "Resume el tema central de esta consulta en un título de 3 a 5 palabras en español.\n"
-            "Ejemplo: 'Dame recomendaciones de libros de psicología' -> 'Libros de Psicología'\n"
-            "Ejemplo: '¿Qué tiempo hace en Sevilla mañana?' -> 'Clima en Sevilla'\n"
-            "REGLA ESTRICTA: Devuelve ÚNICAMENTE el título generado, sin comillas, sin puntos y sin introducciones.\n\n"
-            f"Consulta: {user_text[:200]}"
-        )
-        res = await litellm.acompletion(
-            model=TEXT_MODEL,
-            api_key=api_key,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=20
-        )
-        titulo = res.choices[0].message.content.strip().replace('"', '').replace("'", "").replace(".", "")
-        titulo = titulo.split("\n")[0].strip()
-        if titulo and len(titulo) > 2:
-            return titulo[:40]
-    except Exception as e:
-        print(f"⚠️ Error generando título con LLM: {e}")
-
-    # Fallback por palabras completas (evita cortes como 'Dame recomendaciones de L..')
-    palabras = user_text.strip().split()
-    return " ".join(palabras[:4]).capitalize()
-
-# --- PERFIL PROFESIONAL BASE ---
 BASE_CV = """
 Nombre Completo: Alexis Fernando Pérez Yamasque
 Ubicación: Vigo, Galicia
@@ -240,24 +250,26 @@ async def generar_stream_alexis(
     texto_acumulado = ""
     intent_detectado = "GENERAL_CHAT"
 
+    # 1. Determinación y generación temprana del título
     doc_previo = conversations_collection.find_one({"_id": conv_id})
-    debe_titular = (
-        doc_previo is None
-        or len(doc_previo.get("messages", [])) <= 2
-        or str(doc_previo.get("title", "")).endswith("...")
-    )
+    es_nuevo = (doc_previo is None or len(doc_previo.get("messages", [])) == 0)
+
+    if es_nuevo or not doc_previo.get("title") or str(doc_previo.get("title", "")).endswith("..."):
+        titulo_chat = await generar_titulo_inteligente(message or "Análisis de Imagen", api_key)
+    else:
+        titulo_chat = doc_previo.get("title", "Conversación")
 
     try:
-        # 1. ANÁLISIS DE IMAGEN CON GEMINI SDK
+        # A. ANÁLISIS DE IMAGEN CON GEMINI SDK
         if image_base64:
             intent_detectado = "IMAGE_ANALYSIS"
-            yield f"data: {json.dumps({'intent': intent_detectado, 'conversation_id': conv_id, 'token': ''})}\n\n"
+            yield f"data: {json.dumps({'intent': intent_detectado, 'conversation_id': conv_id, 'title': titulo_chat, 'token': ''})}\n\n"
 
             gemini_key = os.getenv("GEMINI_API_KEY")
             if not gemini_key:
                 err_msg = "⚠️ Falta configurar la variable GEMINI_API_KEY en el servidor."
                 yield f"data: {json.dumps({'token': err_msg})}\n\n"
-                guardar_en_conversacion(user_id, conv_id, message or "📸 [Imagen]", err_msg, intent_detectado)
+                guardar_en_conversacion(user_id, conv_id, message or "📸 [Imagen]", err_msg, intent_detectado, title=titulo_chat)
                 yield "data: [DONE]\n\n"
                 return
 
@@ -276,17 +288,11 @@ async def generar_stream_alexis(
             )
             texto_acumulado = response.text.strip()
             yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
-            guardar_en_conversacion(user_id, conv_id, message or "📸 [Imagen]", texto_acumulado, intent_detectado)
-
-            if debe_titular:
-                titulo_nuevo = await generar_titulo_inteligente(message or "Análisis de Imagen", texto_acumulado, api_key)
-                conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
-                yield f"data: {json.dumps({'new_title': titulo_nuevo, 'conversation_id': conv_id})}\n\n"
-
+            guardar_en_conversacion(user_id, conv_id, message or "📸 [Imagen]", texto_acumulado, intent_detectado, title=titulo_chat)
             yield "data: [DONE]\n\n"
             return
 
-        # 2. CLASIFICACIÓN DE INTENCIÓN
+        # B. CLASIFICACIÓN DE INTENCIÓN
         mensaje_lower = message.lower()
         palabras_clima = ["tiempo", "clima", "temperatura", "grados", "lluvia", "meteorológico", "soleado", "nublado", "viento", "presión", "humedad"]
 
@@ -306,9 +312,10 @@ async def generar_stream_alexis(
             )
             intent_detectado = re.sub(r'[^A-Z_]', '', clasif.choices[0].message.content.strip().upper()) or "GENERAL_CHAT"
 
-        yield f"data: {json.dumps({'intent': intent_detectado, 'conversation_id': conv_id, 'token': ''})}\n\n"
+        # Emitir conversation_id y title al frontend en el primer paquete
+        yield f"data: {json.dumps({'intent': intent_detectado, 'conversation_id': conv_id, 'title': titulo_chat, 'token': ''})}\n\n"
 
-        # 3. PREPARACIÓN DE CONTEXTO POR INTENCIÓN
+        # C. PREPARACIÓN DE CONTEXTO POR INTENCIÓN
         mensajes_para_llm = []
 
         if "WEATHER" in intent_detectado:
@@ -392,20 +399,14 @@ async def generar_stream_alexis(
 
             texto_acumulado = f"He optimizado el perfil profesional con éxito:\n\n{str(cv_res)}"
             yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
-            guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado)
-
-            if debe_titular:
-                titulo_nuevo = await generar_titulo_inteligente(message, texto_acumulado, api_key)
-                conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
-                yield f"data: {json.dumps({'new_title': titulo_nuevo, 'conversation_id': conv_id})}\n\n"
-
+            guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
             yield "data: [DONE]\n\n"
             return
 
         elif "DOMOTICS_CONTROL" in intent_detectado:
             texto_acumulado = "Entendido, Alexis. Conectando con los sistemas de domótica... (Módulo IoT en desarrollo)."
             yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
-            guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado)
+            guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
             yield "data: [DONE]\n\n"
             return
 
@@ -425,13 +426,13 @@ async def generar_stream_alexis(
                     f"Perfil del usuario:\n{contexto_perfil}\n{contexto_doc}\n"
                     "REGLAS OBLIGATORIAS:\n"
                     "1. Formato visual: Listas con viñetas (*), negritas en conceptos clave y sin tablas Markdown (|).\n"
-                    "2. Fórmulas matemáticas: Usa SIEMPRE formato LaTeX estándar con delimitadores $$ para ecuaciones en bloque y $ para fórmulas en línea (nunca uses corchetes \\[ \\] ni paréntesis \\( \\)).\n"
+                    "2. Fórmulas matemáticas: Usa SIEMPRE formato LaTeX estándar con delimitadores $$ para ecuaciones en bloque y $ para fórmulas en línea.\n"
                     "3. Responde siempre en español, de forma concisa y elegante."
                 )
             }
             mensajes_para_llm = [prompt_sistema] + historial_previo + [{"role": "user", "content": message}]
 
-        # 4. TRANSMISIÓN DE TOKENS (STREAMING)
+        # D. TRANSMISIÓN DE TOKENS (STREAMING)
         response_stream = await litellm.acompletion(
             model=TEXT_MODEL,
             api_key=api_key,
@@ -445,22 +446,15 @@ async def generar_stream_alexis(
                 texto_acumulado += token
                 yield f"data: {json.dumps({'token': token})}\n\n"
 
-        # 5. PERSISTENCIA FINAL
+        # E. PERSISTENCIA FINAL CON TÍTULO
         guardar_en_conversacion(
             user_id=user_id,
             conversation_id=conv_id,
             user_text=message or "📸 [Imagen enviada]",
             bot_response=texto_acumulado,
-            intent=intent_detectado
+            intent=intent_detectado,
+            title=titulo_chat
         )
-
-        if debe_titular and (message or texto_acumulado):
-            try:
-                titulo_nuevo = await generar_titulo_inteligente(message, texto_acumulado, api_key)
-                conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
-                yield f"data: {json.dumps({'new_title': titulo_nuevo, 'conversation_id': conv_id})}\n\n"
-            except Exception as err:
-                print(f"⚠️ Error generando título inteligente: {err}")
 
         yield "data: [DONE]\n\n"
 
@@ -671,7 +665,7 @@ async def handle_assistant_voice(
             os.remove(nombre_temp)
         raise HTTPException(status_code=500, detail=f"Error en nota de voz: {str(e)}")
 
-# --- UTILIDADES AVANZADAS (BÚSQUEDA Y EXPORTACIÓN) ---
+# --- UTILIDADES AVANZADAS (BÚSQUEDA Y AUTO-REPARACIÓN DE TÍTULOS) ---
 
 @router.get("/conversations/search/{user_id}")
 async def search_user_conversations(user_id: str, q: str = Query("", description="Término a buscar")):
@@ -735,16 +729,40 @@ async def export_conversation_markdown(conversation_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error exportando conversación: {str(e)}")
 
-# --- SESIONES Y GESTIÓN DE CHATS ---
+# --- SESIONES Y AUTO-REPARACIÓN RETROACTIVA DE TÍTULOS ---
 
 @router.get("/conversations/{user_id}")
 async def get_user_conversations(user_id: str):
+    """Devuelve todas las sesiones del usuario y auto-repara títulos truncados de chats antiguos."""
     try:
         cursor = conversations_collection.find(
             {"user_id": user_id},
-            {"_id": 1, "title": 1, "updated_at": 1}
+            {"_id": 1, "title": 1, "updated_at": 1, "messages": {"$slice": 1}}
         ).sort("updated_at", -1)
-        chats = [{"id": str(c["_id"]), "title": c.get("title", "Conversación"), "updated_at": c.get("updated_at")} for c in cursor]
+
+        chats = []
+        for c in cursor:
+            titulo = c.get("title", "")
+            # Si el título antiguo quedó truncado con '...' o está vacío, se limpia y actualiza en Atlas
+            if not titulo or str(titulo).endswith("...") or len(titulo) < 3:
+                primer_msg = ""
+                if c.get("messages") and len(c["messages"]) > 0:
+                    primer_msg = c["messages"][0].get("content", "")
+
+                if primer_msg:
+                    stopwords = {"dame", "dime", "explicame", "explícame", "quiero", "saber", "como", "cómo", "funciona", "el", "la", "los", "las", "un", "una", "de", "del", "en", "para", "por", "que", "qué", "sobre", "🎙️", "📸"}
+                    palabras = [p for p in re.sub(r'[^\w\s]', '', primer_msg).split() if p.lower() not in stopwords]
+                    titulo = " ".join(palabras[:4]).title() if palabras else primer_msg[:25].title()
+                else:
+                    titulo = "Conversación"
+
+                conversations_collection.update_one({"_id": c["_id"]}, {"$set": {"title": titulo}})
+
+            chats.append({
+                "id": str(c["_id"]),
+                "title": titulo,
+                "updated_at": c.get("updated_at")
+            })
         return {"conversations": chats}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al listar conversaciones: {str(e)}")
