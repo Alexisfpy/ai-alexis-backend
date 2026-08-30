@@ -34,7 +34,7 @@ from app.services.tts_service import sintetizar_voz_neural
 TEXT_MODEL = "groq/openai/gpt-oss-120b"
 VISION_MODEL = "gemini-3.6-flash"
 
-# RUTA ABSOLUTA AL ARCHIVO .env
+# RUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
 ruta_env = ruta_raiz / ".env"
 load_dotenv(dotenv_path=ruta_env)
@@ -61,7 +61,6 @@ CACHE_TTL = {
 }
 
 def get_cached(key: str, cache_type: str) -> Optional[Any]:
-    """Obtiene un valor de la caché si no ha expirado."""
     if key in _cache:
         data, timestamp = _cache[key]
         if time.time() - timestamp < CACHE_TTL.get(cache_type, 300):
@@ -71,12 +70,10 @@ def get_cached(key: str, cache_type: str) -> Optional[Any]:
     return None
 
 def set_cached(key: str, value: Any, cache_type: str):
-    """Guarda un valor en caché con timestamp."""
     _cache[key] = (value, time.time())
 
-# --- HELPERS: GESTIÓN DE HISTORIALES Y SESIONES ---
+# --- HELPERS: HISTORIALES Y SESIONES ---
 def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent: str):
-    """Guarda mensajes en la colección general chat_history."""
     try:
         history_collection.update_one(
             {"_id": user_id},
@@ -96,7 +93,6 @@ def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent
         print(f"⚠️ Error guardando en chat_history: {e}")
 
 def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, bot_response: str, intent: str) -> str:
-    """Guarda o actualiza mensajes dentro de una sesión de chat específica en Atlas."""
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
 
@@ -125,12 +121,11 @@ def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, 
     return conversation_id
 
 async def generar_titulo_inteligente(user_text: str, bot_response: str, api_key: str) -> str:
-    """Genera un título conciso de 3 a 5 palabras mediante el LLM."""
     try:
         prompt = (
             "Genera un título descriptivo y conciso de 3 a 5 palabras en español "
             "para identificar esta conversación en una lista lateral.\n"
-            "REGLA ESTRICTA: Responde ÚNICAMENTE con el título, sin comillas, sin puntos finales y sin explicaciones.\n\n"
+            "REGLA ESTRICTA: Responde ÚNICAMENTE con el título generado, sin comillas, sin puntos finales y sin introducciones.\n\n"
             f"Usuario: {user_text[:250]}\n"
             f"Asistente: {bot_response[:250]}"
         )
@@ -235,7 +230,11 @@ async def generar_stream_alexis(
     intent_detectado = "GENERAL_CHAT"
 
     doc_previo = conversations_collection.find_one({"_id": conv_id})
-    es_primer_mensaje = doc_previo is None or len(doc_previo.get("messages", [])) == 0
+    debe_titular = (
+        doc_previo is None
+        or len(doc_previo.get("messages", [])) <= 2
+        or str(doc_previo.get("title", "")).endswith("...")
+    )
 
     try:
         # 1. ANÁLISIS DE IMAGEN CON GEMINI SDK
@@ -268,15 +267,15 @@ async def generar_stream_alexis(
             yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
             guardar_en_conversacion(user_id, conv_id, message or "📸 [Imagen]", texto_acumulado, intent_detectado)
 
-            if es_primer_mensaje:
+            if debe_titular:
                 titulo_nuevo = await generar_titulo_inteligente(message or "Análisis de Imagen", texto_acumulado, api_key)
                 conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
-                yield f"data: {json.dumps({'new_title': titulo_nuevo})}\n\n"
+                yield f"data: {json.dumps({'new_title': titulo_nuevo, 'conversation_id': conv_id})}\n\n"
 
             yield "data: [DONE]\n\n"
             return
 
-        # 2. CLASIFICACIÓN DE INTENCIONES
+        # 2. CLASIFICACIÓN DE INTENCIÓN
         mensaje_lower = message.lower()
         palabras_clima = ["tiempo", "clima", "temperatura", "grados", "lluvia", "meteorológico", "soleado", "nublado", "viento", "presión", "humedad"]
 
@@ -298,7 +297,7 @@ async def generar_stream_alexis(
 
         yield f"data: {json.dumps({'intent': intent_detectado, 'conversation_id': conv_id, 'token': ''})}\n\n"
 
-        # 3. PREPARACIÓN DE CONTEXTO
+        # 3. PREPARACIÓN DE CONTEXTO POR INTENCIÓN
         mensajes_para_llm = []
 
         if "WEATHER" in intent_detectado:
@@ -384,10 +383,10 @@ async def generar_stream_alexis(
             yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
             guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado)
 
-            if es_primer_mensaje:
+            if debe_titular:
                 titulo_nuevo = await generar_titulo_inteligente(message, texto_acumulado, api_key)
                 conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
-                yield f"data: {json.dumps({'new_title': titulo_nuevo})}\n\n"
+                yield f"data: {json.dumps({'new_title': titulo_nuevo, 'conversation_id': conv_id})}\n\n"
 
             yield "data: [DONE]\n\n"
             return
@@ -444,10 +443,13 @@ async def generar_stream_alexis(
             intent=intent_detectado
         )
 
-        if es_primer_mensaje and (message or texto_acumulado):
-            titulo_nuevo = await generar_titulo_inteligente(message, texto_acumulado, api_key)
-            conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
-            yield f"data: {json.dumps({'new_title': titulo_nuevo})}\n\n"
+        if debe_titular and (message or texto_acumulado):
+            try:
+                titulo_nuevo = await generar_titulo_inteligente(message, texto_acumulado, api_key)
+                conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
+                yield f"data: {json.dumps({'new_title': titulo_nuevo, 'conversation_id': conv_id})}\n\n"
+            except Exception as err:
+                print(f"⚠️ Error generando título inteligente: {err}")
 
         yield "data: [DONE]\n\n"
 
@@ -457,7 +459,7 @@ async def generar_stream_alexis(
         yield "data: [DONE]\n\n"
 
 
-# --- PROCESADOR SÍNCRONO (FALLBACK Y LLAMADAS DIRECTAS) ---
+# --- PROCESADOR SÍNCRONO (FALLBACK) ---
 async def procesar_mensaje_alexis(
     message: str,
     cv_texto: str,
@@ -522,10 +524,7 @@ async def procesar_mensaje_alexis(
     else:
         prompt_sistema = {
             "role": "system",
-            "content": (
-                f"Eres AI Alexis (J.A.R.V.I.S.).\nPerfil:\n{cv_texto[:1500]}\nRAG:\n{rag_context}\n"
-                "Para matemáticas usa siempre delimitadores LaTeX $ y $$."
-            )
+            "content": f"Eres AI Alexis (J.A.R.V.I.S.).\nPerfil:\n{cv_texto[:1500]}\nRAG:\n{rag_context}\nPara matemáticas usa siempre delimitadores LaTeX $ y $$."
         }
         chat_res = litellm.completion(model=TEXT_MODEL, api_key=api_key, messages=[prompt_sistema, {"role": "user", "content": message}])
         return AssistantResponse(intent="GENERAL_CHAT", response=chat_res.choices[0].message.content)
@@ -535,7 +534,6 @@ async def procesar_mensaje_alexis(
 
 @router.post("/chat-stream")
 async def handle_assistant_chat_stream(payload: AssistantRequest):
-    """Endpoint principal de chat con respuestas en streaming (SSE)."""
     api_key = payload.groq_api_key
     if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
         api_key = os.getenv("GROQ_API_KEY")
@@ -568,7 +566,6 @@ async def handle_assistant_chat_stream(payload: AssistantRequest):
 
 @router.post("/chat", response_model=AssistantResponse)
 async def handle_assistant_chat(payload: AssistantRequest):
-    """Endpoint síncrono estándar de chat."""
     api_key = payload.groq_api_key or os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
@@ -605,7 +602,6 @@ async def handle_assistant_voice(
     conversation_id: Optional[str] = Form(None),
     cv_text: str = Form("")
 ):
-    """Transcribe audio con Whisper, procesa la intención y guarda en la sesión activa."""
     api_key = groq_api_key or os.getenv("GROQ_API_KEY")
     if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
         api_key = os.getenv("GROQ_API_KEY")
@@ -664,11 +660,10 @@ async def handle_assistant_voice(
             os.remove(nombre_temp)
         raise HTTPException(status_code=500, detail=f"Error en nota de voz: {str(e)}")
 
-# --- ENDPOINTS DE UTILIDADES AVANZADAS (BÚSQUEDA Y EXPORTACIÓN) ---
+# --- UTILIDADES AVANZADAS (BÚSQUEDA Y EXPORTACIÓN) ---
 
 @router.get("/conversations/search/{user_id}")
 async def search_user_conversations(user_id: str, q: str = Query("", description="Término a buscar")):
-    """Búsqueda en tiempo real por palabras clave en los títulos y mensajes de las conversaciones."""
     try:
         query_limpia = q.strip()
         if not query_limpia:
@@ -698,7 +693,6 @@ async def search_user_conversations(user_id: str, q: str = Query("", description
 
 @router.get("/conversation/{conversation_id}/export/markdown")
 async def export_conversation_markdown(conversation_id: str):
-    """Devuelve la conversación completa formateada en un archivo descargable Markdown (.md)."""
     try:
         doc = conversations_collection.find_one({"_id": conversation_id})
         if not doc or "messages" not in doc:
@@ -730,11 +724,10 @@ async def export_conversation_markdown(conversation_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error exportando conversación: {str(e)}")
 
-# --- ENDPOINTS DE SESIONES Y GESTIÓN DE CHATS ---
+# --- SESIONES Y GESTIÓN DE CHATS ---
 
 @router.get("/conversations/{user_id}")
 async def get_user_conversations(user_id: str):
-    """Devuelve todas las sesiones de chat del usuario ordenadas por fecha."""
     try:
         cursor = conversations_collection.find(
             {"user_id": user_id},
@@ -747,7 +740,6 @@ async def get_user_conversations(user_id: str):
 
 @router.get("/conversation/{conversation_id}")
 async def get_conversation_messages(conversation_id: str):
-    """Recupera los mensajes de un chat específico."""
     try:
         doc = conversations_collection.find_one({"_id": conversation_id})
         if doc and "messages" in doc:
@@ -758,7 +750,6 @@ async def get_conversation_messages(conversation_id: str):
 
 @router.delete("/conversation/{conversation_id}")
 async def delete_conversation(conversation_id: str):
-    """Elimina una conversación y sus mensajes en Atlas."""
     try:
         conversations_collection.delete_one({"_id": conversation_id})
         return {"status": "deleted"}
@@ -767,7 +758,6 @@ async def delete_conversation(conversation_id: str):
 
 @router.get("/history/{user_id}")
 async def get_user_chat_history(user_id: str):
-    """Recupera el historial general de chat."""
     try:
         doc = history_collection.find_one({"_id": user_id})
         if doc and "messages" in doc:
@@ -776,7 +766,7 @@ async def get_user_chat_history(user_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al recuperar historial: {str(e)}")
 
-# --- ENDPOINTS DOCUMENTAL (RAG) Y CV ---
+# --- DOCUMENTOS (RAG) Y CV ---
 
 @router.post("/upload-cv")
 async def handle_upload_cv(file: UploadFile = File(...), user_id: str = Form("guest_user")):
@@ -811,14 +801,13 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Form(...)
     except Exception as e:
         return {"status": "error", "message": f"Error al indexar documento: {str(e)}"}
 
-# --- ENDPOINT TTS (TEXT-TO-SPEECH) ---
+# --- TEXT-TO-SPEECH (TTS) ---
 class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "es-ES-AlvaroNeural"
 
 @router.post("/tts")
 async def generar_audio_tts(payload: TTSRequest):
-    """Genera audio binario MP3 usando Edge TTS."""
     try:
         audio_bytes = await sintetizar_voz_neural(payload.text, voice=payload.voice or "es-ES-AlvaroNeural")
         return Response(content=audio_bytes, media_type="audio/mpeg")
