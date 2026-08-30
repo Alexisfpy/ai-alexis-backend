@@ -121,25 +121,36 @@ def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, 
     return conversation_id
 
 async def generar_titulo_inteligente(user_text: str, bot_response: str, api_key: str) -> str:
+    """Genera un título descriptivo y conciso de 3 a 5 palabras mediante el LLM."""
+    if not user_text or not user_text.strip():
+        return "Nueva Conversación"
+
     try:
         prompt = (
-            "Genera un título descriptivo y conciso de 3 a 5 palabras en español "
-            "para identificar esta conversación en una lista lateral.\n"
-            "REGLA ESTRICTA: Responde ÚNICAMENTE con el título generado, sin comillas, sin puntos finales y sin introducciones.\n\n"
-            f"Usuario: {user_text[:250]}\n"
-            f"Asistente: {bot_response[:250]}"
+            "Eres un generador de títulos ultra-concisos.\n"
+            "Resume el tema central de esta consulta en un título de 3 a 5 palabras en español.\n"
+            "Ejemplo: 'Dame recomendaciones de libros de psicología' -> 'Libros de Psicología'\n"
+            "Ejemplo: '¿Qué tiempo hace en Sevilla mañana?' -> 'Clima en Sevilla'\n"
+            "REGLA ESTRICTA: Devuelve ÚNICAMENTE el título generado, sin comillas, sin puntos y sin introducciones.\n\n"
+            f"Consulta: {user_text[:200]}"
         )
         res = await litellm.acompletion(
             model=TEXT_MODEL,
             api_key=api_key,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=25
+            temperature=0.2,
+            max_tokens=20
         )
-        titulo = res.choices[0].message.content.strip().replace('"', '').replace("'", "")
-        return titulo[:45] if titulo else user_text[:30]
-    except Exception:
-        return user_text[:30] + ("..." if len(user_text) > 30 else "")
+        titulo = res.choices[0].message.content.strip().replace('"', '').replace("'", "").replace(".", "")
+        titulo = titulo.split("\n")[0].strip()
+        if titulo and len(titulo) > 2:
+            return titulo[:40]
+    except Exception as e:
+        print(f"⚠️ Error generando título con LLM: {e}")
+
+    # Fallback por palabras completas (evita cortes como 'Dame recomendaciones de L..')
+    palabras = user_text.strip().split()
+    return " ".join(palabras[:4]).capitalize()
 
 # --- PERFIL PROFESIONAL BASE ---
 BASE_CV = """
