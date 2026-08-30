@@ -4,33 +4,35 @@ import litellm
 import re
 import json
 import time
+import uuid
+import base64
+import asyncio
 from typing import Optional, Any
+from datetime import datetime
+from pathlib import Path
+
 import httpx
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
-from fastapi.responses import StreamingResponse, Response
-from app.schemas.assistant import AssistantRequest, AssistantResponse
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
+from fastapi.responses import StreamingResponse, Response, PlainTextResponse
+from pydantic import BaseModel
+from pymongo import MongoClient
+from dotenv import load_dotenv
 from duckduckgo_search import DDGS
 from crewai import Agent, Task, Crew, Process, LLM
 from pypdf import PdfReader
-from pymongo import MongoClient
-from dotenv import load_dotenv
-from pathlib import Path
-from app.services.weather_service import consultar_clima_open_meteo
 from tavily import TavilyClient
-from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
-import base64
 from google import genai
 from google.genai import types
+
+from app.schemas.assistant import AssistantRequest, AssistantResponse
+from app.services.weather_service import consultar_clima_open_meteo
 from app.services.news_service import buscar_noticias
-import uuid
-from datetime import datetime
-from pydantic import BaseModel
+from app.services.rag_service import extract_text_from_pdf, index_document_content, vector_search
 from app.services.tts_service import sintetizar_voz_neural
-import asyncio
 
 # --- CONFIGURACIÓN DE MODELOS ---
-TEXT_MODEL = "groq/openai/gpt-oss-120b"  # Groq (Texto, RAG, Búsqueda, Clima, Agentes)
-VISION_MODEL = "gemini-3.6-flash"        # Google AI (Visión y análisis de imágenes)
+TEXT_MODEL = "groq/openai/gpt-oss-120b"
+VISION_MODEL = "gemini-3.6-flash"
 
 # RUTA ABSOLUTA AL ARCHIVO .env
 ruta_raiz = Path(__file__).resolve().parent.parent.parent
@@ -42,7 +44,6 @@ router = APIRouter(prefix="/assistant", tags=["AI Alexis Assistant"])
 # --- CONEXIÓN A MONGODB ATLAS ---
 MONGODB_URI = os.getenv("MONGODB_URI")
 if not MONGODB_URI:
-    print("❌ ERROR CRÍTICO: MONGODB_URI no se está leyendo del archivo .env")
     MONGODB_URI = "mongodb://localhost:27017"
 
 client = MongoClient(MONGODB_URI)
@@ -51,7 +52,7 @@ profiles_collection = db["profiles"]
 history_collection = db["chat_history"]
 conversations_collection = db["conversations"]
 
-# --- CACHÉ SIMPLE CON TTL ---
+# --- CACHÉ EN MEMORIA CON TTL ---
 _cache = {}
 CACHE_TTL = {
     "weather": 600,   # 10 minutos
@@ -70,10 +71,12 @@ def get_cached(key: str, cache_type: str) -> Optional[Any]:
     return None
 
 def set_cached(key: str, value: Any, cache_type: str):
+    """Guarda un valor en caché con timestamp."""
     _cache[key] = (value, time.time())
 
-# --- HELPER: GUARDAR MENSAJES EN MONGO ATLAS ---
+# --- HELPERS: GESTIÓN DE HISTORIALES Y SESIONES ---
 def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent: str):
+    """Guarda mensajes en la colección general chat_history."""
     try:
         history_collection.update_one(
             {"_id": user_id},
@@ -90,21 +93,21 @@ def guardar_en_historial(user_id: str, user_text: str, bot_response: str, intent
             upsert=True
         )
     except Exception as e:
-        print(f"⚠️ Error guardando historial en Atlas: {e}")
+        print(f"⚠️ Error guardando en chat_history: {e}")
 
-# --- HELPER: GUARDAR / CREAR SESIÓN DE CHAT ---
 def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, bot_response: str, intent: str) -> str:
+    """Guarda o actualiza mensajes dentro de una sesión de chat específica en Atlas."""
     if not conversation_id:
         conversation_id = str(uuid.uuid4())
-    
-    titulo = user_text[:30] + ("..." if len(user_text) > 30 else "")
-    
+
+    titulo_inicial = user_text[:30] + ("..." if len(user_text) > 30 else "")
+
     conversations_collection.update_one(
         {"_id": conversation_id},
         {
             "$setOnInsert": {
                 "user_id": user_id,
-                "title": titulo,
+                "title": titulo_inicial,
                 "created_at": datetime.utcnow()
             },
             "$set": {"updated_at": datetime.utcnow()},
@@ -121,6 +124,28 @@ def guardar_en_conversacion(user_id: str, conversation_id: str, user_text: str, 
     )
     return conversation_id
 
+async def generar_titulo_inteligente(user_text: str, bot_response: str, api_key: str) -> str:
+    """Genera un título conciso de 3 a 5 palabras mediante el LLM."""
+    try:
+        prompt = (
+            "Genera un título descriptivo y conciso de 3 a 5 palabras en español "
+            "para identificar esta conversación en una lista lateral.\n"
+            "REGLA ESTRICTA: Responde ÚNICAMENTE con el título, sin comillas, sin puntos finales y sin explicaciones.\n\n"
+            f"Usuario: {user_text[:250]}\n"
+            f"Asistente: {bot_response[:250]}"
+        )
+        res = await litellm.acompletion(
+            model=TEXT_MODEL,
+            api_key=api_key,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
+            max_tokens=25
+        )
+        titulo = res.choices[0].message.content.strip().replace('"', '').replace("'", "")
+        return titulo[:45] if titulo else user_text[:30]
+    except Exception:
+        return user_text[:30] + ("..." if len(user_text) > 30 else "")
+
 # --- PERFIL PROFESIONAL BASE ---
 BASE_CV = """
 Nombre Completo: Alexis Fernando Pérez Yamasque
@@ -129,7 +154,6 @@ Perfil Profesional:
 Ingeniero de IA y Estudiante de Big Data con sólida formación en desarrollo multiplataforma y administración de sistemas. Especializado en el diseño, entrenamiento y despliegue de modelos de Machine Learning y Deep Learning.
 """
 
-# --- UTILERÍA: EXTRACTOR DE TEXTO DE PDF ---
 def extraer_texto_pdf(contenido_bytes: bytes) -> str:
     try:
         fichero_pdf = io.BytesIO(contenido_bytes)
@@ -143,16 +167,13 @@ def extraer_texto_pdf(contenido_bytes: bytes) -> str:
     except Exception as e:
         raise Exception(f"No se pudo decodificar el PDF: {str(e)}")
 
-# --- OPTIMIZADOR INTELIGENTE DE BÚSQUEDAS ---
 def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
     try:
         prompt_optimizador = (
             "Tu único trabajo es convertir un mensaje conversacional en una consulta de búsqueda "
             "ultra-eficiente de 2 a 4 palabras clave para un buscador web.\n"
-            "Ejemplo: '¿Sabes quién ganó el partido de ayer del Real Madrid?' -> 'resultado Real Madrid ayer'\n\n"
-            "REGLA ESTRICTA: Responde ÚNICAMENTE con las palabras clave sugeridas, sin introducciones, sin comillas y sin explicaciones."
+            "REGLA ESTRICTA: Responde ÚNICAMENTE con las palabras clave sugeridas, sin introducciones ni comillas."
         )
-        
         response = litellm.completion(
             model=TEXT_MODEL,
             api_key=api_key,
@@ -162,21 +183,17 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
             ],
             temperature=0.0
         )
-        query_limpia = response.choices[0].message.content.strip().replace('"', '').replace("'", "")
-        return query_limpia
+        return response.choices[0].message.content.strip().replace('"', '').replace("'", "")
     except Exception:
         return mensaje_usuario
 
-# --- EJECUTOR DE BÚSQUEDAS EN TIEMPO REAL ---
 def buscar_en_internet(query: str) -> str:
     tavily_key = os.getenv("TAVILY_API_KEY")
-    
     if tavily_key:
         try:
             tavily = TavilyClient(api_key=tavily_key)
             response = tavily.search(query=query, search_depth="basic", max_results=3)
             resultados = response.get("results", [])
-            
             if resultados:
                 contexto = ""
                 for i, r in enumerate(resultados, 1):
@@ -200,7 +217,7 @@ def buscar_en_internet(query: str) -> str:
 
     return "No se encontraron resultados actualizados en la web."
 
-# --- GENERADOR ASÍNCRONO PARA STREAMING (SSE) ---
+# --- GENERADOR ASÍNCRONO DE STREAMING (SSE) ---
 async def generar_stream_alexis(
     message: str,
     cv_texto: str,
@@ -217,12 +234,15 @@ async def generar_stream_alexis(
     texto_acumulado = ""
     intent_detectado = "GENERAL_CHAT"
 
+    doc_previo = conversations_collection.find_one({"_id": conv_id})
+    es_primer_mensaje = doc_previo is None or len(doc_previo.get("messages", [])) == 0
+
     try:
-        # 1. ANÁLISIS DE IMAGEN (VISIÓN GEMINI)
+        # 1. ANÁLISIS DE IMAGEN CON GEMINI SDK
         if image_base64:
             intent_detectado = "IMAGE_ANALYSIS"
             yield f"data: {json.dumps({'intent': intent_detectado, 'conversation_id': conv_id, 'token': ''})}\n\n"
-            
+
             gemini_key = os.getenv("GEMINI_API_KEY")
             if not gemini_key:
                 err_msg = "⚠️ Falta configurar la variable GEMINI_API_KEY en el servidor."
@@ -240,48 +260,45 @@ async def generar_stream_alexis(
                 f"Consulta del usuario: {texto_usuario}\n"
                 "Responde de forma concisa, profesional y en español."
             )
-
             response = client.models.generate_content(
                 model=VISION_MODEL,
-                contents=[
-                    prompt_vision,
-                    types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-                ]
+                contents=[prompt_vision, types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")]
             )
             texto_acumulado = response.text.strip()
             yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
             guardar_en_conversacion(user_id, conv_id, message or "📸 [Imagen]", texto_acumulado, intent_detectado)
+
+            if es_primer_mensaje:
+                titulo_nuevo = await generar_titulo_inteligente(message or "Análisis de Imagen", texto_acumulado, api_key)
+                conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
+                yield f"data: {json.dumps({'new_title': titulo_nuevo})}\n\n"
+
             yield "data: [DONE]\n\n"
             return
 
-        # 2. CLASIFICACIÓN DE INTENCIÓN
+        # 2. CLASIFICACIÓN DE INTENCIONES
         mensaje_lower = message.lower()
         palabras_clima = ["tiempo", "clima", "temperatura", "grados", "lluvia", "meteorológico", "soleado", "nublado", "viento", "presión", "humedad"]
-        
+
         if any(p in mensaje_lower for p in palabras_clima):
             intent_detectado = "WEATHER"
         else:
             system_prompt = (
                 "Eres el clasificador de intenciones de AI Alexis.\n"
-                "Tu único trabajo es leer el mensaje del usuario y responder ÚNICAMENTE con una de estas cinco palabras:\n"
-                "- 'WEATHER', 'SEARCH', 'CV_OPTIMIZATION', 'DOMOTICS_CONTROL', 'GENERAL_CHAT'.\n"
-                "REGLA ESTRICTA: Responde SOLO con la palabra exacta en mayúsculas."
+                "Responde ÚNICAMENTE con una de estas cinco palabras en mayúsculas:\n"
+                "- 'WEATHER', 'SEARCH', 'CV_OPTIMIZATION', 'DOMOTICS_CONTROL', 'GENERAL_CHAT'."
             )
             clasif = await litellm.acompletion(
                 model=TEXT_MODEL,
                 api_key=api_key,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": message}
-                ],
+                messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": message}],
                 temperature=0.0
             )
             intent_detectado = re.sub(r'[^A-Z_]', '', clasif.choices[0].message.content.strip().upper()) or "GENERAL_CHAT"
 
-        # Emitir metadata inicial
         yield f"data: {json.dumps({'intent': intent_detectado, 'conversation_id': conv_id, 'token': ''})}\n\n"
 
-        # 3. PREPARACIÓN DE CONTEXTO POR INTENCIÓN
+        # 3. PREPARACIÓN DE CONTEXTO
         mensajes_para_llm = []
 
         if "WEATHER" in intent_detectado:
@@ -289,7 +306,7 @@ async def generar_stream_alexis(
                 model=TEXT_MODEL,
                 api_key=api_key,
                 messages=[
-                    {"role": "system", "content": "Extrae SOLO la ciudad/municipio del mensaje. Si no hay, responde 'Vigo'."},
+                    {"role": "system", "content": "Extrae SOLO la ciudad/municipio. Si no hay, responde 'Vigo'."},
                     {"role": "user", "content": message}
                 ],
                 temperature=0.0
@@ -304,12 +321,10 @@ async def generar_stream_alexis(
                 set_cached(cache_key, datos_clima, "weather")
 
             prompt_clima = (
-                "Eres AI Alexis, un asistente virtual directo, inteligente y elegante (inspirado en J.A.R.V.I.S.).\n"
-                "1. Responde de forma clara y directa con los datos meteorológicos proporcionados.\n"
-                "2. NUNCA sugieras buscar en webs externas ni incluyas enlaces.\n"
-                "3. Presenta la información en lista con viñetas (*), usando negritas para los datos clave.\n\n"
+                "Eres AI Alexis (J.A.R.V.I.S.). Responde de forma clara y directa con los datos meteorológicos.\n"
+                "Presenta la información en lista con viñetas (*), negritas en valores clave y sin enlaces externos.\n\n"
                 f"DATOS OPEN-METEO (JSON):\n{json.dumps(datos_clima, ensure_ascii=False)}\n\n"
-                f"Consulta del usuario: {message}"
+                f"Consulta: {message}"
             )
             mensajes_para_llm = [{"role": "user", "content": prompt_clima}]
 
@@ -328,11 +343,9 @@ async def generar_stream_alexis(
                     set_cached(cache_key, noticias_raw, "news")
 
                 prompt_search = (
-                    "Eres AI Alexis, un asistente informativo de alta precisión (inspirado en J.A.R.V.I.S.).\n"
-                    "FECHA ACTUAL DEL SISTEMA: Año 2026.\n"
-                    "Presenta los titulares de forma estructurada con viñetas (*), nombres de fuentes y enlaces [Leer más](url).\n\n"
-                    f"NOTICIAS RECUPERADAS:\n{noticias_raw}\n\n"
-                    f"Consulta del usuario: {message}"
+                    "Eres AI Alexis (J.A.R.V.I.S.). FECHA ACTUAL: Año 2026.\n"
+                    "Presenta los titulares con viñetas (*), fuentes entre paréntesis y enlaces [Leer más](url).\n\n"
+                    f"NOTICIAS:\n{noticias_raw}\n\nConsulta: {message}"
                 )
             else:
                 cache_key = f"web_{tema.lower()}"
@@ -342,11 +355,9 @@ async def generar_stream_alexis(
                     set_cached(cache_key, contexto_web, "web")
 
                 prompt_search = (
-                    "Eres AI Alexis, un asistente virtual directo e inteligente (inspirado en J.A.R.V.I.S.).\n"
-                    "FECHA ACTUAL DEL SISTEMA: Año 2026.\n"
-                    "Usa la siguiente información de internet para responder de forma clara con viñetas (*).\n\n"
-                    f"INFORMACIÓN WEB:\n{contexto_web}\n\n"
-                    f"Consulta del usuario: {message}"
+                    "Eres AI Alexis (J.A.R.V.I.S.). FECHA ACTUAL: Año 2026.\n"
+                    "Responde basándote en estos datos en formato de lista con viñetas (*):\n\n"
+                    f"INFORMACIÓN WEB:\n{contexto_web}\n\nConsulta: {message}"
                 )
             mensajes_para_llm = [{"role": "user", "content": prompt_search}]
 
@@ -354,49 +365,30 @@ async def generar_stream_alexis(
             extraction = await litellm.acompletion(
                 model=TEXT_MODEL,
                 api_key=api_key,
-                messages=[
-                    {"role": "system", "content": "Extrae exclusivamente la descripción del puesto o requisitos."},
-                    {"role": "user", "content": message}
-                ],
+                messages=[{"role": "system", "content": "Extrae exclusivamente la descripción del puesto o requisitos."}, {"role": "user", "content": message}],
                 temperature=0.1
             )
             oferta_laboral = extraction.choices[0].message.content.strip()
 
             llm_groq = LLM(model=TEXT_MODEL, api_key=api_key)
-            reclutador = Agent(
-                role="Reclutador Técnico Senior",
-                goal="Analizar ofertas de empleo y extraer requisitos técnicos y palabras clave ATS.",
-                backstory="Experto reclutador tech enfocado en indexación de competencias.",
-                verbose=False,
-                llm=llm_groq
-            )
-            redactor = Agent(
-                role="Consultor de Carreras y Redactor Técnico",
-                goal="Adaptar el CV base del usuario a la vacante laboral.",
-                backstory="Redactor técnico senior de currículums de ingeniería.",
-                verbose=False,
-                llm=llm_groq
-            )
-            tarea_analisis = Task(
-                description=f"Analiza esta oferta:\n\n{oferta_laboral}",
-                expected_output="Reporte con competencias clave y requisitos obligatorios.",
-                agent=reclutador
-            )
-            tarea_adaptacion = Task(
-                description=f"CV Base:\n\n{cv_texto}\n\nAdapta el perfil y experiencia a la vacante en Markdown.",
-                expected_output="Currículum optimizado en Markdown profesional.",
-                agent=redactor
-            )
-            orquestador = Crew(
-                agents=[reclutador, redactor],
-                tasks=[tarea_analisis, tarea_adaptacion],
-                process=Process.sequential,
-                memory=False
-            )
+            reclutador = Agent(role="Reclutador Técnico", goal="Extraer requisitos clave ATS.", backstory="Experto en screening de perfiles tech.", verbose=False, llm=llm_groq)
+            redactor = Agent(role="Redactor Técnico", goal="Adaptar perfil y CV del usuario.", backstory="Consultor y redactor de perfiles de ingeniería.", verbose=False, llm=llm_groq)
+
+            tarea_analisis = Task(description=f"Oferta laboral:\n{oferta_laboral}", expected_output="Palabras clave y requisitos ATS.", agent=reclutador)
+            tarea_adaptacion = Task(description=f"CV Base:\n{cv_texto}\nAdapta al puesto.", expected_output="Currículum adaptado en Markdown profesional.", agent=redactor)
+
+            orquestador = Crew(agents=[reclutador, redactor], tasks=[tarea_analisis, tarea_adaptacion], process=Process.sequential, memory=False)
             cv_res = await asyncio.to_thread(orquestador.kickoff)
-            texto_acumulado = f"He activado a los agentes para optimizar el CV:\n\n{str(cv_res)}"
+
+            texto_acumulado = f"He optimizado el perfil profesional con éxito:\n\n{str(cv_res)}"
             yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
             guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado)
+
+            if es_primer_mensaje:
+                titulo_nuevo = await generar_titulo_inteligente(message, texto_acumulado, api_key)
+                conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
+                yield f"data: {json.dumps({'new_title': titulo_nuevo})}\n\n"
+
             yield "data: [DONE]\n\n"
             return
 
@@ -408,27 +400,25 @@ async def generar_stream_alexis(
             return
 
         else:
-            # GENERAL_CHAT & RAG
             historial_previo = []
-            doc = conversations_collection.find_one({"_id": conv_id})
-            if doc and "messages" in doc:
-                for m in doc["messages"][-6:]:
+            if doc_previo and "messages" in doc_previo:
+                for m in doc_previo["messages"][-6:]:
                     historial_previo.append({"role": m["role"], "content": m["content"]})
 
-            contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil registrado."
-            contexto_doc = f"\n--- RAG ---\n{rag_context}\n-----------\n" if rag_context else ""
+            contexto_perfil = cv_texto[:1500] if cv_texto else "Sin perfil."
+            contexto_doc = f"\n--- BASE DE CONOCIMIENTO (RAG) ---\n{rag_context}\n---------------------------------\n" if rag_context else ""
 
             prompt_sistema = {
                 "role": "system",
                 "content": (
-                    f"Eres AI Alexis (J.A.R.V.I.S.). Asistente leal, técnico y elegante.\n"
+                    f"Eres AI Alexis (J.A.R.V.I.S.). Asistente leal, inteligente y técnico.\n"
                     f"Perfil del usuario:\n{contexto_perfil}\n{contexto_doc}"
-                    "Reglas: Listas con viñetas (*), negritas en puntos clave, sin tablas Markdown (|) y en español."
+                    "Reglas: Listas con viñetas (*), negritas en conceptos clave, sin tablas Markdown (|) y en español."
                 )
             }
             mensajes_para_llm = [prompt_sistema] + historial_previo + [{"role": "user", "content": message}]
 
-        # 4. STREAMING DE TOKENS DEL LLM
+        # 4. TRANSMISIÓN DE TOKENS (STREAMING)
         response_stream = await litellm.acompletion(
             model=TEXT_MODEL,
             api_key=api_key,
@@ -442,7 +432,7 @@ async def generar_stream_alexis(
                 texto_acumulado += token
                 yield f"data: {json.dumps({'token': token})}\n\n"
 
-        # 5. GUARDADO EN BASE DE DATOS
+        # 5. PERSISTENCIA FINAL
         guardar_en_conversacion(
             user_id=user_id,
             conversation_id=conv_id,
@@ -451,15 +441,20 @@ async def generar_stream_alexis(
             intent=intent_detectado
         )
 
+        if es_primer_mensaje and (message or texto_acumulado):
+            titulo_nuevo = await generar_titulo_inteligente(message, texto_acumulado, api_key)
+            conversations_collection.update_one({"_id": conv_id}, {"$set": {"title": titulo_nuevo}})
+            yield f"data: {json.dumps({'new_title': titulo_nuevo})}\n\n"
+
         yield "data: [DONE]\n\n"
 
     except Exception as e:
-        err_msg = f"⚠️ Error durante la generación en streaming: {str(e)}"
+        err_msg = f"⚠️ Error en streaming: {str(e)}"
         yield f"data: {json.dumps({'token': err_msg, 'intent': 'ERROR'})}\n\n"
         yield "data: [DONE]\n\n"
 
 
-# --- PROCESADOR SÍNCRONO (FALLBACK / ENDPOINTS TRADICIONALES) ---
+# --- PROCESADOR SÍNCRONO (FALLBACK Y LLAMADAS DIRECTAS) ---
 async def procesar_mensaje_alexis(
     message: str,
     cv_texto: str,
@@ -480,7 +475,7 @@ async def procesar_mensaje_alexis(
             image_bytes = base64.b64decode(image_base64)
             response = client.models.generate_content(
                 model=VISION_MODEL,
-                contents=["Analiza y describe la imagen.", types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), message or ""]
+                contents=["Analiza y describe la imagen en español.", types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg"), message or ""]
             )
             return AssistantResponse(intent="IMAGE_ANALYSIS", response=response.text.strip())
         except Exception as e:
@@ -510,7 +505,7 @@ async def procesar_mensaje_alexis(
         ubicacion = re.sub(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]', '', res_loc.choices[0].message.content.strip()) or "Vigo"
         dias = 1 if "mañana" in message.lower() else 0
         datos_clima = await consultar_clima_open_meteo(ubicacion, dias=dias)
-        prompt_clima = f"Eres AI Alexis. Responde con estos datos del clima en viñetas (*):\n{json.dumps(datos_clima, ensure_ascii=False)}\nConsulta: {message}"
+        prompt_clima = f"Eres AI Alexis. Responde con estos datos en viñetas (*):\n{json.dumps(datos_clima, ensure_ascii=False)}\nConsulta: {message}"
         chat_res = litellm.completion(model=TEXT_MODEL, api_key=api_key, messages=[{"role": "user", "content": prompt_clima}])
         return AssistantResponse(intent="WEATHER", response=chat_res.choices[0].message.content)
 
@@ -527,11 +522,11 @@ async def procesar_mensaje_alexis(
         return AssistantResponse(intent="GENERAL_CHAT", response=chat_res.choices[0].message.content)
 
 
-# --- ENDPOINTS ---
+# --- ENDPOINTS PRINCIPALES ---
 
 @router.post("/chat-stream")
 async def handle_assistant_chat_stream(payload: AssistantRequest):
-    """Endpoint principal con streaming SSE (Server-Sent Events)."""
+    """Endpoint principal de chat con respuestas en streaming (SSE)."""
     api_key = payload.groq_api_key
     if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
         api_key = os.getenv("GROQ_API_KEY")
@@ -540,14 +535,7 @@ async def handle_assistant_chat_stream(payload: AssistantRequest):
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada en el servidor.")
 
     user_id = payload.user_id or "guest_user"
-
-    rag_context = ""
-    if payload.message:
-        try:
-            rag_context = vector_search(user_id=user_id, query=payload.message, limit=3)
-        except Exception:
-            rag_context = ""
-
+    rag_context = vector_search(user_id=user_id, query=payload.message, limit=3) if payload.message else ""
     db_profile = profiles_collection.find_one({"_id": user_id})
     cv_a_procesar = db_profile.get("cv_text", BASE_CV) if db_profile else BASE_CV
 
@@ -565,12 +553,13 @@ async def handle_assistant_chat_stream(payload: AssistantRequest):
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Accel-Buffering": "no"  # Desactiva buffering en Nginx
+            "X-Accel-Buffering": "no"
         }
     )
 
 @router.post("/chat", response_model=AssistantResponse)
 async def handle_assistant_chat(payload: AssistantRequest):
+    """Endpoint síncrono estándar de chat."""
     api_key = payload.groq_api_key or os.getenv("GROQ_API_KEY")
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
@@ -599,28 +588,23 @@ async def handle_assistant_chat(payload: AssistantRequest):
     resultado.conversation_id = conv_id
     return resultado
 
-@router.get("/history/{user_id}")
-async def get_user_chat_history(user_id: str):
-    try:
-        doc = history_collection.find_one({"_id": user_id})
-        if doc and "messages" in doc:
-            return {"messages": doc["messages"]}
-        return {"messages": []}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al recuperar historial: {str(e)}")
-
 @router.post("/voice", response_model=AssistantResponse)
 async def handle_assistant_voice(
     file: UploadFile = File(...),
     groq_api_key: str = Form(None),
     user_id: str = Form("guest_user"),
+    conversation_id: Optional[str] = Form(None),
     cv_text: str = Form("")
 ):
+    """Transcribe audio con Whisper, procesa la intención y guarda en la sesión activa."""
     api_key = groq_api_key or os.getenv("GROQ_API_KEY")
+    if not api_key or str(api_key).strip().lower() in ["string", "null", "none", "", "undefined"]:
+        api_key = os.getenv("GROQ_API_KEY")
+
     if not api_key:
         raise HTTPException(status_code=400, detail="API Key de Groq no configurada.")
 
-    nombre_temp = f"temp_{file.filename}"
+    nombre_temp = f"temp_{uuid.uuid4().hex}_{file.filename}"
     try:
         with open(nombre_temp, "wb") as f:
             f.write(await file.read())
@@ -631,9 +615,11 @@ async def handle_assistant_voice(
                 file=audio_file,
                 api_key=api_key
             )
-        os.remove(nombre_temp)
-        texto_transcrito = transcription.get("text", "").strip()
 
+        if os.path.exists(nombre_temp):
+            os.remove(nombre_temp)
+
+        texto_transcrito = transcription.get("text", "").strip()
         if not texto_transcrito:
             raise HTTPException(status_code=400, detail="No se pudo entender el audio.")
 
@@ -648,13 +634,140 @@ async def handle_assistant_voice(
             user_id=user_id,
             rag_context=rag_context
         )
-        guardar_en_historial(user_id, f"🎙️ [Nota de voz]: {texto_transcrito}", resultado.response, resultado.intent)
-        resultado.response = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
+
+        respuesta_con_transcripcion = f"*(Entendí: \"{texto_transcrito}\")*\n\n{resultado.response}"
+
+        conv_id = guardar_en_conversacion(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            user_text=f"🎙️ {texto_transcrito}",
+            bot_response=resultado.response,
+            intent=resultado.intent
+        )
+        guardar_en_historial(user_id, f"🎙️ {texto_transcrito}", resultado.response, resultado.intent)
+
+        resultado.response = respuesta_con_transcripcion
+        resultado.conversation_id = conv_id
         return resultado
+
     except Exception as e:
         if os.path.exists(nombre_temp):
             os.remove(nombre_temp)
-        raise HTTPException(status_code=500, detail=f"Error al procesar nota de voz: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error en nota de voz: {str(e)}")
+
+# --- ENDPOINTS DE UTILIDADES AVANZADAS (BÚSQUEDA Y EXPORTACIÓN) ---
+
+@router.get("/conversations/search/{user_id}")
+async def search_user_conversations(user_id: str, q: str = Query("", description="Término a buscar")):
+    """Búsqueda en tiempo real por palabras clave en los títulos y mensajes de las conversaciones."""
+    try:
+        query_limpia = q.strip()
+        if not query_limpia:
+            cursor = conversations_collection.find(
+                {"user_id": user_id},
+                {"_id": 1, "title": 1, "updated_at": 1}
+            ).sort("updated_at", -1)
+            chats = [{"id": str(c["_id"]), "title": c.get("title", "Conversación"), "updated_at": c.get("updated_at")} for c in cursor]
+            return {"conversations": chats}
+
+        regex_pattern = {"$regex": re.escape(query_limpia), "$options": "i"}
+        cursor = conversations_collection.find(
+            {
+                "user_id": user_id,
+                "$or": [
+                    {"title": regex_pattern},
+                    {"messages.content": regex_pattern}
+                ]
+            },
+            {"_id": 1, "title": 1, "updated_at": 1}
+        ).sort("updated_at", -1)
+
+        chats = [{"id": str(c["_id"]), "title": c.get("title", "Conversación"), "updated_at": c.get("updated_at")} for c in cursor]
+        return {"conversations": chats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al buscar conversaciones: {str(e)}")
+
+@router.get("/conversation/{conversation_id}/export/markdown")
+async def export_conversation_markdown(conversation_id: str):
+    """Devuelve la conversación completa formateada en un archivo descargable Markdown (.md)."""
+    try:
+        doc = conversations_collection.find_one({"_id": conversation_id})
+        if not doc or "messages" not in doc:
+            raise HTTPException(status_code=404, detail="Conversación no encontrada.")
+
+        titulo = doc.get("title", "Conversacion").replace(" ", "_")
+        fecha_creacion = doc.get("created_at", datetime.utcnow()).strftime("%Y-%m-%d %H:%M")
+
+        md_content = [
+            f"# 💬 Conversación: {doc.get('title', 'AI Alexis Chat')}",
+            f"**Fecha:** {fecha_creacion} | **ID:** `{conversation_id}`\n",
+            "---\n"
+        ]
+
+        for m in doc["messages"]:
+            rol = "🧑 **Usuario**" if m["role"] == "user" else "🤖 **AI Alexis**"
+            intent_info = f" *(Intención: {m['intent']})*" if m.get("intent") else ""
+            md_content.append(f"### {rol}{intent_info}\n")
+            md_content.append(f"{m['content']}\n")
+            md_content.append("---\n")
+
+        resultado_texto = "\n".join(md_content)
+        headers = {
+            "Content-Disposition": f"attachment; filename={titulo}_{conversation_id[:6]}.md"
+        }
+        return PlainTextResponse(content=resultado_texto, media_type="text/markdown", headers=headers)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error exportando conversación: {str(e)}")
+
+# --- ENDPOINTS DE SESIONES Y GESTIÓN DE CHATS ---
+
+@router.get("/conversations/{user_id}")
+async def get_user_conversations(user_id: str):
+    """Devuelve todas las sesiones de chat del usuario ordenadas por fecha."""
+    try:
+        cursor = conversations_collection.find(
+            {"user_id": user_id},
+            {"_id": 1, "title": 1, "updated_at": 1}
+        ).sort("updated_at", -1)
+        chats = [{"id": str(c["_id"]), "title": c.get("title", "Conversación"), "updated_at": c.get("updated_at")} for c in cursor]
+        return {"conversations": chats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al listar conversaciones: {str(e)}")
+
+@router.get("/conversation/{conversation_id}")
+async def get_conversation_messages(conversation_id: str):
+    """Recupera los mensajes de un chat específico."""
+    try:
+        doc = conversations_collection.find_one({"_id": conversation_id})
+        if doc and "messages" in doc:
+            return {"messages": doc["messages"]}
+        return {"messages": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al obtener mensajes: {str(e)}")
+
+@router.delete("/conversation/{conversation_id}")
+async def delete_conversation(conversation_id: str):
+    """Elimina una conversación y sus mensajes en Atlas."""
+    try:
+        conversations_collection.delete_one({"_id": conversation_id})
+        return {"status": "deleted"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al eliminar conversación: {str(e)}")
+
+@router.get("/history/{user_id}")
+async def get_user_chat_history(user_id: str):
+    """Recupera el historial general de chat."""
+    try:
+        doc = history_collection.find_one({"_id": user_id})
+        if doc and "messages" in doc:
+            return {"messages": doc["messages"]}
+        return {"messages": []}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al recuperar historial: {str(e)}")
+
+# --- ENDPOINTS DOCUMENTAL (RAG) Y CV ---
 
 @router.post("/upload-cv")
 async def handle_upload_cv(file: UploadFile = File(...), user_id: str = Form("guest_user")):
@@ -689,43 +802,14 @@ async def upload_document(file: UploadFile = File(...), user_id: str = Form(...)
     except Exception as e:
         return {"status": "error", "message": f"Error al indexar documento: {str(e)}"}
 
-@router.get("/conversations/{user_id}")
-async def get_user_conversations(user_id: str):
-    try:
-        cursor = conversations_collection.find(
-            {"user_id": user_id},
-            {"_id": 1, "title": 1, "updated_at": 1}
-        ).sort("updated_at", -1)
-        chats = [{"id": str(c["_id"]), "title": c.get("title", "Conversación"), "updated_at": c.get("updated_at")} for c in cursor]
-        return {"conversations": chats}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al listar conversaciones: {str(e)}")
-
-@router.get("/conversation/{conversation_id}")
-async def get_conversation_messages(conversation_id: str):
-    try:
-        doc = conversations_collection.find_one({"_id": conversation_id})
-        if doc and "messages" in doc:
-            return {"messages": doc["messages"]}
-        return {"messages": []}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al obtener mensajes: {str(e)}")
-
-@router.delete("/conversation/{conversation_id}")
-async def delete_conversation(conversation_id: str):
-    try:
-        conversations_collection.delete_one({"_id": conversation_id})
-        return {"status": "deleted"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al eliminar conversación: {str(e)}")
-
-# --- ENDPOINTS TTS ---
+# --- ENDPOINT TTS (TEXT-TO-SPEECH) ---
 class TTSRequest(BaseModel):
     text: str
     voice: Optional[str] = "es-ES-AlvaroNeural"
 
 @router.post("/tts")
 async def generar_audio_tts(payload: TTSRequest):
+    """Genera audio binario MP3 usando Edge TTS."""
     try:
         audio_bytes = await sintetizar_voz_neural(payload.text, voice=payload.voice or "es-ES-AlvaroNeural")
         return Response(content=audio_bytes, media_type="audio/mpeg")
