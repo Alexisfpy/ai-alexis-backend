@@ -412,8 +412,11 @@ async def generar_stream_alexis(
                 "role": "system",
                 "content": (
                     f"Eres AI Alexis (J.A.R.V.I.S.). Asistente leal, inteligente y técnico.\n"
-                    f"Perfil del usuario:\n{contexto_perfil}\n{contexto_doc}"
-                    "Reglas: Listas con viñetas (*), negritas en conceptos clave, sin tablas Markdown (|) y en español."
+                    f"Perfil del usuario:\n{contexto_perfil}\n{contexto_doc}\n"
+                    "REGLAS OBLIGATORIAS:\n"
+                    "1. Formato visual: Listas con viñetas (*), negritas en conceptos clave y sin tablas Markdown (|).\n"
+                    "2. Fórmulas matemáticas: Usa SIEMPRE formato LaTeX estándar con delimitadores $$ para ecuaciones en bloque y $ para fórmulas en línea (nunca uses corchetes \\[ \\] ni paréntesis \\( \\)).\n"
+                    "3. Responde siempre en español, de forma concisa y elegante."
                 )
             }
             mensajes_para_llm = [prompt_sistema] + historial_previo + [{"role": "user", "content": message}]
@@ -517,7 +520,13 @@ async def procesar_mensaje_alexis(
         return AssistantResponse(intent="SEARCH", response=chat_res.choices[0].message.content)
 
     else:
-        prompt_sistema = {"role": "system", "content": f"Eres AI Alexis (J.A.R.V.I.S.).\nPerfil:\n{cv_texto[:1500]}\nRAG:\n{rag_context}"}
+        prompt_sistema = {
+            "role": "system",
+            "content": (
+                f"Eres AI Alexis (J.A.R.V.I.S.).\nPerfil:\n{cv_texto[:1500]}\nRAG:\n{rag_context}\n"
+                "Para matemáticas usa siempre delimitadores LaTeX $ y $$."
+            )
+        }
         chat_res = litellm.completion(model=TEXT_MODEL, api_key=api_key, messages=[prompt_sistema, {"role": "user", "content": message}])
         return AssistantResponse(intent="GENERAL_CHAT", response=chat_res.choices[0].message.content)
 
