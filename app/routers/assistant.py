@@ -430,8 +430,9 @@ async def generar_stream_alexis(
                 yield "data: [DONE]\n\n"
                 return
 
-            palabras_crear = ["crear", "añadir", "agrega", "agendar", "programa", "nueva reunión", "nueva cita", "nuevo evento"]
-            es_creacion = any(w in mensaje_lower for w in palabras_crear)
+            # Detección precisa de intención de creación (evita falsos positivos con 'programados')
+            patron_crear = r'\b(crear|crea|añadir|añade|agrega|agendar|agenda|programa una|programa un|nuevo evento|nueva cita|nueva reunión)\b'
+            es_creacion = bool(re.search(patron_crear, mensaje_lower))
 
             if es_creacion:
                 datos_ev = await extraer_datos_evento(message, api_key)

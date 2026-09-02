@@ -86,9 +86,9 @@ class GoogleWorkspaceService:
     # ==========================================
 
     @classmethod
-    async def list_upcoming_events(cls, user_id: str, max_results: int = 10) -> List[Dict[str, Any]]:
+    def list_upcoming_events(cls, user_id: str, max_results: int = 10) -> List[Dict[str, Any]]:
         """Devuelve los próximos eventos de la agenda."""
-        creds = await cls.get_credentials(user_id)
+        creds = cls.get_credentials(user_id)
         if not creds:
             raise ValueError("Cuenta de Google no conectada.")
 
@@ -119,7 +119,7 @@ class GoogleWorkspaceService:
         return formatted_events
 
     @classmethod
-    async def create_event(
+    def create_event(
         cls,
         user_id: str,
         summary: str,
@@ -129,7 +129,7 @@ class GoogleWorkspaceService:
         location: str = ""
     ) -> Dict[str, Any]:
         """Crea un nuevo evento en Google Calendar."""
-        creds = await cls.get_credentials(user_id)
+        creds = cls.get_credentials(user_id)
         if not creds:
             raise ValueError("Cuenta de Google no conectada.")
 
@@ -156,9 +156,9 @@ class GoogleWorkspaceService:
     # ==========================================
 
     @classmethod
-    async def list_unread_emails(cls, user_id: str, max_results: int = 5) -> List[Dict[str, Any]]:
+    def list_unread_emails(cls, user_id: str, max_results: int = 5) -> List[Dict[str, Any]]:
         """Recupera los últimos correos no leídos."""
-        creds = await cls.get_credentials(user_id)
+        creds = cls.get_credentials(user_id)
         if not creds:
             raise ValueError("Cuenta de Google no conectada.")
 
@@ -193,9 +193,9 @@ class GoogleWorkspaceService:
         return detailed_emails
 
     @classmethod
-    async def send_email(cls, user_id: str, to: str, subject: str, body: str) -> Dict[str, Any]:
+    def send_email(cls, user_id: str, to: str, subject: str, body: str) -> Dict[str, Any]:
         """Envía un correo electrónico a través de Gmail."""
-        creds = await cls.get_credentials(user_id)
+        creds = cls.get_credentials(user_id)
         if not creds:
             raise ValueError("Cuenta de Google no conectada.")
 
@@ -213,9 +213,9 @@ class GoogleWorkspaceService:
         return {"id": sent.get("id"), "status": "sent"}
 
     @classmethod
-    async def create_draft(cls, user_id: str, to: str, subject: str, body: str) -> Dict[str, Any]:
+    def create_draft(cls, user_id: str, to: str, subject: str, body: str) -> Dict[str, Any]:
         """Crea un borrador en Gmail sin enviarlo."""
-        creds = await cls.get_credentials(user_id)
+        creds = cls.get_credentials(user_id)
         if not creds:
             raise ValueError("Cuenta de Google no conectada.")
 
