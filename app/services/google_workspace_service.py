@@ -128,18 +128,26 @@ class GoogleWorkspaceService:
         description: str = "",
         location: str = ""
     ) -> Dict[str, Any]:
-        """Crea un nuevo evento en Google Calendar."""
+        """Crea un nuevo evento en Google Calendar con zona horaria definida."""
         creds = cls.get_credentials(user_id)
         if not creds:
             raise ValueError("Cuenta de Google no conectada.")
 
         service = build("calendar", "v3", credentials=creds)
+        
+        # Google Calendar exige timeZone si la fecha no trae offset UTC explícito
         event_body = {
             "summary": summary,
             "description": description,
             "location": location,
-            "start": {"dateTime": start_time_iso},
-            "end": {"dateTime": end_time_iso},
+            "start": {
+                "dateTime": start_time_iso,
+                "timeZone": "Europe/Madrid",
+            },
+            "end": {
+                "dateTime": end_time_iso,
+                "timeZone": "Europe/Madrid",
+            },
         }
 
         created_event = service.events().insert(calendarId="primary", body=event_body).execute()

@@ -198,7 +198,7 @@ async def extraer_datos_evento(mensaje_usuario: str, api_key: str) -> dict:
     """Extrae título, fecha y hora en formato ISO 8601 a partir del mensaje."""
     now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     prompt = (
-        f"FECHA Y HORA ACTUAL: {now_str}. Tu tarea es extraer la información de un evento.\n"
+        f"FECHA Y HORA ACTUAL: {now_str}. Tu tarea es extraer la información de un evento para Google Calendar.\n"
         "Calcula la fecha y hora exacta mencionada basándote en la fecha actual.\n"
         "Si no se especifica duración, asume 1 hora después del inicio.\n"
         "Responde ÚNICAMENTE un objeto JSON válido con esta estructura exacta (sin Markdown ni bloques de código):\n"
@@ -421,7 +421,6 @@ async def generar_stream_alexis(
             mensajes_para_llm = [{"role": "user", "content": prompt_search}]
 
         elif "CALENDAR" in intent_detectado:
-            # 1. Comprobar si el usuario tiene la cuenta vinculada
             creds = GoogleWorkspaceService.get_credentials(user_id)
             if not creds:
                 texto_acumulado = "⚠️ No tienes vinculada tu cuenta de Google Workspace. Por favor, conéctala desde la barra superior para gestionar tu calendario."
@@ -430,9 +429,13 @@ async def generar_stream_alexis(
                 yield "data: [DONE]\n\n"
                 return
 
-            # Detección precisa de intención de creación (evita falsos positivos con 'programados')
+            # Si el usuario explícitamente pregunta qué tiene, consultar siempre la lista
+            palabras_consulta = ["qué tengo", "que tengo", "cuáles", "cuales", "ver agenda", "listar", "próximos", "proximos", "tengo algo", "revisar agenda"]
+            es_consulta_explicita = any(q in mensaje_lower for q in palabras_consulta)
+
+            # Expresión regular con límites de palabra para no confundir 'programados' con 'programa'
             patron_crear = r'\b(crear|crea|añadir|añade|agrega|agendar|agenda|programa una|programa un|nuevo evento|nueva cita|nueva reunión)\b'
-            es_creacion = bool(re.search(patron_crear, mensaje_lower))
+            es_creacion = bool(re.search(patron_crear, mensaje_lower)) and not es_consulta_explicita
 
             if es_creacion:
                 datos_ev = await extraer_datos_evento(message, api_key)
@@ -462,7 +465,6 @@ async def generar_stream_alexis(
                 yield "data: [DONE]\n\n"
                 return
             else:
-                # Lectura de próximos eventos
                 try:
                     eventos = GoogleWorkspaceService.list_upcoming_events(user_id=user_id, max_results=6)
                     prompt_agenda = (
