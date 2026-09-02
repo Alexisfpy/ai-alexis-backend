@@ -6,7 +6,7 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.patches.litellm_patch import apply_litellm_patch
-from app.routers import cv, assistant
+from app.routers import cv, assistant, google_auth
 
 # 2. Aplicamos el parche de litellm
 apply_litellm_patch()
@@ -30,6 +30,8 @@ app.add_middleware(
 # 5. Registro de las Rutas de los Agentes
 app.include_router(cv.router, prefix="/api/v1")
 app.include_router(assistant.router, prefix="/api/v1")
+app.include_router(google_auth.router)
+
 @app.get("/")
 def read_root():
     return {
