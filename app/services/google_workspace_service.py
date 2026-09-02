@@ -22,21 +22,21 @@ COLLECTION_NAME = "google_user_tokens"
 class GoogleWorkspaceService:
 
     @staticmethod
-    async def save_credentials(user_id: str, creds_data: dict) -> None:
+    def save_credentials(user_id: str, creds_data: dict) -> None:
         """Guarda o actualiza las credenciales OAuth en MongoDB para un user_id."""
         creds_data["user_id"] = user_id
         creds_data["updated_at"] = datetime.now(timezone.utc)
         
-        await google_tokens_collection.update_one(
+        google_tokens_collection.update_one(
             {"user_id": user_id},
             {"$set": creds_data},
             upsert=True
         )
 
     @staticmethod
-    async def get_credentials(user_id: str) -> Optional[Credentials]:
+    def get_credentials(user_id: str) -> Optional[Credentials]:
         """Obtiene y refresca (si es necesario) las credenciales de un usuario."""
-        token_doc = await google_tokens_collection.find_one({"user_id": user_id})
+        token_doc = google_tokens_collection.find_one({"user_id": user_id})
         if not token_doc:
             return None
 
@@ -66,15 +66,15 @@ class GoogleWorkspaceService:
         return creds
 
     @staticmethod
-    async def delete_credentials(user_id: str) -> bool:
+    def delete_credentials(user_id: str) -> bool:
         """Elimina la vinculación de la cuenta de Google."""
-        result = await google_tokens_collection.delete_one({"user_id": user_id})
+        result = google_tokens_collection.delete_one({"user_id": user_id})
         return result.deleted_count > 0
 
     @classmethod
-    async def get_user_email(cls, user_id: str) -> Optional[str]:
+    def get_user_email(cls, user_id: str) -> Optional[str]:
         """Consulta el correo de la cuenta vinculada de Google."""
-        creds = await cls.get_credentials(user_id)
+        creds = cls.get_credentials(user_id)
         if not creds:
             return None
         service = build("gmail", "v1", credentials=creds)
