@@ -53,7 +53,7 @@ class GoogleWorkspaceService:
         if creds.expired and creds.refresh_token:
             creds.refresh(Request())
             # Actualizar el nuevo access_token en la base de datos
-            await google_tokens_collection.update_one(
+            google_tokens_collection.update_one(
                 {"user_id": user_id},
                 {
                     "$set": {
