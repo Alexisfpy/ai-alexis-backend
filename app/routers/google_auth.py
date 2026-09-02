@@ -4,6 +4,7 @@ from fastapi.responses import RedirectResponse
 from google_auth_oauthlib.flow import Flow
 
 from app.services.google_workspace_service import GoogleWorkspaceService, SCOPES
+from app.core.database import google_tokens_collection
 
 router = APIRouter(prefix="/api/v1/google", tags=["Google Workspace Auth"])
 
@@ -49,6 +50,15 @@ def google_login(user_id: str = Query(..., description="ID de usuario de Clerk")
         include_granted_scopes="true",
         prompt="consent"
     )
+
+    # Persistir temporalmente el code_verifier de PKCE generado por Flow
+    if getattr(flow, "code_verifier", None):
+        google_tokens_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"code_verifier": flow.code_verifier}},
+            upsert=True
+        )
+
     return RedirectResponse(url=authorization_url)
 
 
@@ -56,13 +66,19 @@ def google_login(user_id: str = Query(..., description="ID de usuario de Clerk")
 def google_callback(code: str = Query(...), state: str = Query(...)):
     """
     Recibe el código de Google tras la autorización,
-    guarda los tokens en MongoDB asociados al user_id y redirige al frontend.
+    recupera el code_verifier, intercambia los tokens y los guarda en MongoDB.
     """
     user_id = state
     frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
     try:
         flow = get_oauth_flow(state=state)
+
+        # Restaurar el code_verifier previo para que el intercambio no falle
+        token_doc = google_tokens_collection.find_one({"user_id": user_id})
+        if token_doc and token_doc.get("code_verifier"):
+            flow.code_verifier = token_doc["code_verifier"]
+
         flow.fetch_token(code=code)
         creds = flow.credentials
 
@@ -73,7 +89,13 @@ def google_callback(code: str = Query(...), state: str = Query(...)):
             "scopes": list(creds.scopes) if creds.scopes else SCOPES,
         }
 
+        # Guardar credenciales definitivas y limpiar el code_verifier temporal
         GoogleWorkspaceService.save_credentials(user_id, creds_data)
+        google_tokens_collection.update_one(
+            {"user_id": user_id},
+            {"$unset": {"code_verifier": ""}}
+        )
+
         return RedirectResponse(url=f"{frontend_url}/?google_auth=success")
 
     except Exception as e:
