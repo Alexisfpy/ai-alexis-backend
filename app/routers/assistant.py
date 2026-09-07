@@ -31,6 +31,7 @@ from app.services.tts_service import sintetizar_voz_neural
 from app.core.database import db, profiles_collection, history_collection, conversations_collection
 
 from app.services.google_workspace_service import GoogleWorkspaceService
+import logging
 
 # --- CONFIGURACIÓN DE MODELOS ---
 TEXT_MODEL = "groq/openai/gpt-oss-120b"
@@ -61,6 +62,26 @@ def get_cached(key: str, cache_type: str) -> Optional[Any]:
 
 def set_cached(key: str, value: Any, cache_type: str):
     _cache[key] = (value, time.time())
+
+
+# --- CONFIGURACIÓN DE FECHAS, ZONA HORARIA Y EMAILS
+logger = logging.getLogger("ai_alexis")
+EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+USER_TIMEZONE = "Europe/Madrid"
+
+
+def validar_fecha_iso(cadena_iso: str) -> bool:
+    """Comprueba si la cadena tiene un formato ISO 8601 convertible a datetime."""
+    try:
+        datetime.fromisoformat(cadena_iso)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def validar_email(email_str: str) -> bool:
+    """Verifica que el email cumpla con una estructura estándar."""
+    return bool(EMAIL_REGEX.match(str(email_str).strip()))
 
 # --- GENERADOR DE TÍTULOS INTELIGENTES ---
 async def generar_titulo_inteligente(user_text: str, api_key: str = None) -> str:
@@ -194,15 +215,16 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
     except Exception:
         return mensaje_usuario
 
-async def extraer_datos_evento(mensaje_usuario: str, api_key: str) -> dict:
-    """Extrae título, fecha y hora en formato ISO 8601 a partir del mensaje."""
+async def extraer_datos_evento(mensaje_usuario: str, api_key: str, tz_name: str = USER_TIMEZONE) -> dict:
+    """Extrae título, fecha y hora en formato ISO 8601 respetando la zona horaria del usuario."""
     now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     prompt = (
-        f"FECHA Y HORA ACTUAL: {now_str}. Tu tarea es extraer la información de un evento para Google Calendar.\n"
-        "Calcula la fecha y hora exacta mencionada basándote en la fecha actual.\n"
-        "Si no se especifica duración, asume 1 hora después del inicio.\n"
-        "Responde ÚNICAMENTE un objeto JSON válido con esta estructura exacta (sin Markdown ni bloques de código):\n"
-        '{"summary": "título breve", "start_time_iso": "YYYY-MM-DDTHH:MM:SS", "end_time_iso": "YYYY-MM-DDTHH:MM:SS", "description": ""}\n\n'
+        f"FECHA Y HORA ACTUAL: {now_str} en la zona horaria {tz_name}.\n"
+        "Extrae la información del evento para Google Calendar.\n"
+        "Calcula la fecha y hora de inicio según la hora local actual (no conviertas a UTC).\n"
+        "Si no se especifica duración, la hora de fin debe ser exactamente 1 hora después del inicio.\n"
+        "Responde ÚNICAMENTE un JSON válido (sin Markdown ni comillas invertidas):\n"
+        '{"summary": "título", "start_time_iso": "YYYY-MM-DDTHH:MM:SS", "end_time_iso": "YYYY-MM-DDTHH:MM:SS", "description": ""}\n\n'
         f"Mensaje: {mensaje_usuario}"
     )
     try:
@@ -215,7 +237,7 @@ async def extraer_datos_evento(mensaje_usuario: str, api_key: str) -> dict:
         limpio = res.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(limpio)
     except Exception as e:
-        print(f"⚠️ Error extrayendo datos de evento: {e}")
+        logger.error(f"Error parseando JSON de evento: {e}")
         return None
 
 async def extraer_datos_email(mensaje_usuario: str, api_key: str) -> dict:
@@ -423,42 +445,46 @@ async def generar_stream_alexis(
         elif "CALENDAR" in intent_detectado:
             creds = GoogleWorkspaceService.get_credentials(user_id)
             if not creds:
-                texto_acumulado = "⚠️ No tienes vinculada tu cuenta de Google Workspace. Por favor, conéctala desde la barra superior para gestionar tu calendario."
+                texto_acumulado = "⚠️ No tienes vinculada tu cuenta de Google Workspace. Conéctala desde la barra superior para gestionar tu agenda."
                 yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
                 guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
                 yield "data: [DONE]\n\n"
                 return
 
-            # Si el usuario explícitamente pregunta qué tiene, consultar siempre la lista
             palabras_consulta = ["qué tengo", "que tengo", "cuáles", "cuales", "ver agenda", "listar", "próximos", "proximos", "tengo algo", "revisar agenda"]
             es_consulta_explicita = any(q in mensaje_lower for q in palabras_consulta)
-
-            # Expresión regular con límites de palabra para no confundir 'programados' con 'programa'
             patron_crear = r'\b(crear|crea|añadir|añade|agrega|agendar|agenda|programa una|programa un|nuevo evento|nueva cita|nueva reunión)\b'
             es_creacion = bool(re.search(patron_crear, mensaje_lower)) and not es_consulta_explicita
 
             if es_creacion:
-                datos_ev = await extraer_datos_evento(message, api_key)
-                if datos_ev and datos_ev.get("start_time_iso"):
+                datos_ev = await extraer_datos_evento(message, api_key, tz_name=USER_TIMEZONE)
+                start_iso = datos_ev.get("start_time_iso") if datos_ev else None
+                end_iso = datos_ev.get("end_time_iso") if datos_ev else None
+
+                # Validación de formato previo a la API
+                if not datos_ev or not validar_fecha_iso(start_iso) or not validar_fecha_iso(end_iso):
+                    texto_acumulado = "No pude determinar una fecha u hora válida para agendar la cita. Especifica el día y la hora con claridad (por ejemplo: *mañana a las 10:00*)."
+                else:
                     try:
                         nuevo_ev = GoogleWorkspaceService.create_event(
                             user_id=user_id,
-                            summary=datos_ev.get("summary", "Reunión"),
-                            start_time_iso=datos_ev.get("start_time_iso"),
-                            end_time_iso=datos_ev.get("end_time_iso"),
-                            description=datos_ev.get("description", "")
+                            summary=datos_ev.get("summary", "Cita de trabajo"),
+                            start_time_iso=start_iso,
+                            end_time_iso=end_iso,
+                            description=datos_ev.get("description", ""),
+                            timezone_str=USER_TIMEZONE
                         )
                         texto_acumulado = (
-                            f"📅 **Evento agendado con éxito en tu Google Calendar**\n\n"
+                            f"📅 **Evento agendado con éxito**\n\n"
                             f"* **Título:** {nuevo_ev.get('summary')}\n"
-                            f"* **Inicio:** {nuevo_ev.get('start', {}).get('dateTime', 'Definido')}\n"
-                            f"* **Fin:** {nuevo_ev.get('end', {}).get('dateTime', 'Definido')}\n"
-                            f"* **Enlace:** [Ver en Google Calendar]({nuevo_ev.get('htmlLink')})"
+                            f"* **Inicio:** `{nuevo_ev.get('start', {}).get('dateTime', start_iso)}`\n"
+                            f"* **Fin:** `{nuevo_ev.get('end', {}).get('dateTime', end_iso)}`\n"
+                            f"* **Enlace:** [Abrir en Google Calendar]({nuevo_ev.get('htmlLink')})"
                         )
+                        logger.info(f"Evento creado para user_id={user_id}, conv_id={conv_id}")
                     except Exception as e:
-                        texto_acumulado = f"⚠️ Ocurrió un error al agendar el evento: {str(e)}"
-                else:
-                    texto_acumulado = "No pude determinar la fecha y hora del evento. Por favor indícame el día y la hora exacta (por ejemplo: *mañana a las 17:00*)."
+                        logger.error(f"Error creando evento para user_id={user_id}: {e}")
+                        texto_acumulado = f"⚠️ Ocurrió un fallo en el servicio de Calendar: {str(e)}"
 
                 yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
                 guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
@@ -468,13 +494,14 @@ async def generar_stream_alexis(
                 try:
                     eventos = GoogleWorkspaceService.list_upcoming_events(user_id=user_id, max_results=6)
                     prompt_agenda = (
-                        "Eres AI Alexis (J.A.R.V.I.S.). Presenta los próximos eventos de la agenda del usuario.\n"
-                        "Formato: viñetas (*), negrita en títulos y fechas/horas legibles en español.\n"
-                        "Si no hay eventos, indícale amablemente que tiene la agenda libre.\n\n"
+                        "Eres AI Alexis. Presenta los próximos eventos de la agenda del usuario.\n"
+                        "Formato: lista con viñetas (*), negrita en títulos y fechas legibles en español.\n"
+                        "Si la lista está vacía, indica amablemente que la agenda está despejada.\n\n"
                         f"EVENTOS OBTENIDOS:\n{json.dumps(eventos, ensure_ascii=False)}\n\nConsulta: {message}"
                     )
                     mensajes_para_llm = [{"role": "user", "content": prompt_agenda}]
                 except Exception as e:
+                    logger.error(f"Error listando eventos para user_id={user_id}: {e}")
                     texto_acumulado = f"⚠️ No pude consultar tu calendario: {str(e)}"
                     yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
                     guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
@@ -482,10 +509,9 @@ async def generar_stream_alexis(
                     return
 
         elif "GMAIL" in intent_detectado:
-            # 1. Comprobar vinculación
             creds = GoogleWorkspaceService.get_credentials(user_id)
             if not creds:
-                texto_acumulado = "⚠️ Tu cuenta de Google no está conectada. Conéctala para poder gestionar tu correo de Gmail."
+                texto_acumulado = "⚠️ Tu cuenta de Google no está conectada. Conéctala desde la barra superior para gestionar Gmail."
                 yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
                 guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
                 yield "data: [DONE]\n\n"
@@ -496,56 +522,64 @@ async def generar_stream_alexis(
 
             if es_envio_o_borrador:
                 datos_mail = await extraer_datos_email(message, api_key)
-                if datos_mail and datos_mail.get("to") and "@" in datos_mail.get("to"):
-                    # Por seguridad, si pide redactar o borrador creamos borrador; si pide enviar explícitamente se envía
+                destinatario = datos_mail.get("to") if datos_mail else None
+
+                # Validación de email antes de procesar
+                if not datos_mail or not validar_email(destinatario):
+                    texto_acumulado = "Debes proporcionar una dirección de correo destinataria válida (ejemplo: `nombre@dominio.com`) para redactar o enviar el mensaje."
+                else:
                     solo_borrador = "borrador" in mensaje_lower or "redacta" in mensaje_lower
+                    asunto = datos_mail.get("subject", "Sin Asunto").strip() or "Sin Asunto"
+                    cuerpo = datos_mail.get("body", "").strip()
+
                     try:
                         if solo_borrador:
-                            res_draft = GoogleWorkspaceService.create_draft(
+                            GoogleWorkspaceService.create_draft(
                                 user_id=user_id,
-                                to=datos_mail["to"],
-                                subject=datos_mail.get("subject", "Sin Asunto"),
-                                body=datos_mail.get("body", "")
+                                to=destinatario,
+                                subject=asunto,
+                                body=cuerpo
                             )
                             texto_acumulado = (
-                                f"✉️ **Borrador creado en Gmail con éxito**\n\n"
-                                f"* **Para:** `{datos_mail['to']}`\n"
-                                f"* **Asunto:** {datos_mail.get('subject')}\n"
-                                f"* **Contenido:** {datos_mail.get('body')}"
+                                f"✉️ **Borrador creado en Gmail**\n\n"
+                                f"* **Para:** `{destinatario}`\n"
+                                f"* **Asunto:** {asunto}\n"
+                                f"* **Cuerpo:** {cuerpo}"
                             )
+                            logger.info(f"Borrador creado para user_id={user_id}, conv_id={conv_id}")
                         else:
                             GoogleWorkspaceService.send_email(
                                 user_id=user_id,
-                                to=datos_mail["to"],
-                                subject=datos_mail.get("subject", "Sin Asunto"),
-                                body=datos_mail.get("body", "")
+                                to=destinatario,
+                                subject=asunto,
+                                body=cuerpo
                             )
                             texto_acumulado = (
-                                f"🚀 **Correo enviado con éxito**\n\n"
-                                f"* **Para:** `{datos_mail['to']}`\n"
-                                f"* **Asunto:** {datos_mail.get('subject')}"
+                                f"🚀 **Correo enviado exitosamente**\n\n"
+                                f"* **Destinatario:** `{destinatario}`\n"
+                                f"* **Asunto:** {asunto}"
                             )
+                            logger.info(f"Correo enviado por user_id={user_id}, conv_id={conv_id}")
                     except Exception as e:
-                        texto_acumulado = f"⚠️ Error al procesar el correo: {str(e)}"
-                else:
-                    texto_acumulado = "Necesito que especifiques la dirección de correo destinataria válida para redactar o enviar el email."
+                        logger.error(f"Error procesando correo para user_id={user_id}: {e}")
+                        texto_acumulado = f"⚠️ Ocurrió un error con el servicio de Gmail: {str(e)}"
 
                 yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
                 guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
                 yield "data: [DONE]\n\n"
                 return
             else:
-                # Lectura de correos no leídos
                 try:
                     correos = GoogleWorkspaceService.list_unread_emails(user_id=user_id, max_results=5)
                     prompt_mails = (
-                        "Eres AI Alexis (J.A.R.V.I.S.). Resume los correos no leídos de la bandeja de entrada del usuario.\n"
-                        "Formato: viñetas (*), remitente en negrita, asunto y un resumen breve de una frase del contenido.\n"
-                        "Si la lista está vacía, dile cordialmente que tiene la bandeja al día sin correos pendientes.\n\n"
+                        "Eres AI Alexis. Resume los correos no leídos del usuario.\n"
+                        "Formato: lista con viñetas (*), indicando remitente en negrita, fecha/hora entre paréntesis, asunto y un breve resumen del contenido.\n"
+                        "Si no hay correos no leídos, confirma que la bandeja está al día.\n\n"
                         f"CORREOS NO LEÍDOS:\n{json.dumps(correos, ensure_ascii=False)}\n\nConsulta: {message}"
                     )
                     mensajes_para_llm = [{"role": "user", "content": prompt_mails}]
                 except Exception as e:
+                    logger.error(f"Error listando correos de user_id={user_id}: {e}")
                     texto_acumulado = f"⚠️ No pude consultar tu bandeja de Gmail: {str(e)}"
                     yield f"data: {json.dumps({'token': texto_acumulado})}\n\n"
                     guardar_en_conversacion(user_id, conv_id, message, texto_acumulado, intent_detectado, title=titulo_chat)
