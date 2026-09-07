@@ -110,7 +110,7 @@ async def generar_titulo_inteligente(user_text: str, api_key: str = None) -> str
             if titulo and len(titulo) >= 3 and len(titulo) <= 35:
                 return titulo
         except Exception as e:
-            print(f"⚠️ Error generando título con LLM: {e}")
+            print(f"Error generando título con LLM: {e}")
 
     # Fallback inteligente eliminando palabras vacías comunes
     stopwords = {"dame", "dime", "explicame", "explícame", "quiero", "saber", "como", "cómo", "funciona", "el", "la", "los", "las", "un", "una", "de", "del", "en", "para", "por", "que", "qué", "sobre", "🎙️", "📸"}
@@ -216,14 +216,16 @@ def optimizar_query_busqueda(mensaje_usuario: str, api_key: str) -> str:
         return mensaje_usuario
 
 async def extraer_datos_evento(mensaje_usuario: str, api_key: str, tz_name: str = USER_TIMEZONE) -> dict:
-    """Extrae título, fecha y hora en formato ISO 8601 respetando la zona horaria del usuario."""
+    """Extrae título, fecha y hora en formato ISO 8601 respetando la zona horaria."""
     now_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
     prompt = (
-        f"FECHA Y HORA ACTUAL: {now_str} en la zona horaria {tz_name}.\n"
-        "Extrae la información del evento para Google Calendar.\n"
-        "Calcula la fecha y hora de inicio según la hora local actual (no conviertas a UTC).\n"
-        "Si no se especifica duración, la hora de fin debe ser exactamente 1 hora después del inicio.\n"
-        "Responde ÚNICAMENTE un JSON válido (sin Markdown ni comillas invertidas):\n"
+        f"FECHA Y HORA ACTUAL: {now_str} en zona horaria {tz_name}.\n"
+        "Extrae la información para agendar un evento en Google Calendar.\n"
+        "REGLAS OBLIGATORIAS:\n"
+        "1. Si el usuario NO especifica un día o momento concreto (por ejemplo: 'en algún momento', 'luego', 'algún día'), devuelve: {\"summary\": null, \"start_time_iso\": null, \"end_time_iso\": null}\n"
+        "2. Calcula la fecha y hora de inicio basándote en la fecha actual sin convertir a UTC.\n"
+        "3. Duración por defecto: 1 hora.\n"
+        "Responde ÚNICAMENTE un JSON válido (sin Markdown ni bloques de código):\n"
         '{"summary": "título", "start_time_iso": "YYYY-MM-DDTHH:MM:SS", "end_time_iso": "YYYY-MM-DDTHH:MM:SS", "description": ""}\n\n'
         f"Mensaje: {mensaje_usuario}"
     )
@@ -237,15 +239,18 @@ async def extraer_datos_evento(mensaje_usuario: str, api_key: str, tz_name: str 
         limpio = res.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(limpio)
     except Exception as e:
-        logger.error(f"Error parseando JSON de evento: {e}")
+        logger.error(f"Error parseando JSON de evento: {e}")ç
         return None
 
 async def extraer_datos_email(mensaje_usuario: str, api_key: str) -> dict:
     """Extrae destinatario, asunto y cuerpo para enviar o redactar un correo."""
     prompt = (
-        "Extrae los campos de destinatario, asunto y cuerpo del correo.\n"
-        "Responde ÚNICAMENTE un objeto JSON válido con esta estructura exacta (sin Markdown ni bloques de código):\n"
-        '{"to": "correo@ejemplo.com", "subject": "Asunto conciso", "body": "Texto del correo"}\n\n'
+        "Extrae los campos 'to', 'subject' y 'body' para un correo electrónico.\n"
+        "REGLAS OBLIGATORIAS:\n"
+        "1. Extrae la dirección exacta indicada por el usuario.\n"
+        "2. Si el usuario menciona solo un nombre sin '@' ni dominio (ejemplo: 'carlos', 'juan_perez'), pon \"to\": null. PROHIBIDO autocompletar con dominios como @example.com o @gmail.com.\n"
+        "Responde ÚNICAMENTE un JSON válido (sin Markdown ni bloques de código):\n"
+        '{"to": "correo@dominio.com o null", "subject": "Asunto conciso", "body": "Texto del correo"}\n\n'
         f"Mensaje: {mensaje_usuario}"
     )
     try:
@@ -258,7 +263,7 @@ async def extraer_datos_email(mensaje_usuario: str, api_key: str) -> dict:
         limpio = res.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(limpio)
     except Exception as e:
-        print(f"⚠️ Error extrayendo datos de email: {e}")
+        logger.error(f"Error extrayendo datos de email: {e}")
         return None
 
 def buscar_en_internet(query: str) -> str:
