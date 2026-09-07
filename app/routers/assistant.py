@@ -239,7 +239,7 @@ async def extraer_datos_evento(mensaje_usuario: str, api_key: str, tz_name: str 
         limpio = res.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(limpio)
     except Exception as e:
-        logger.error(f"Error parseando JSON de evento: {e}")ç
+        logger.error(f"Error parseando JSON de evento: {e}")
         return None
 
 async def extraer_datos_email(mensaje_usuario: str, api_key: str) -> dict:
