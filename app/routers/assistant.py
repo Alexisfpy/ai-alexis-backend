@@ -677,7 +677,7 @@ async def generar_stream_alexis(
         yield "data: [DONE]\n\n"
 
 
-# --- PROCESADOR SÍNCRONO (FALLBACK) ---
+# --- PROCESADOR SÍNCRONO (FALLBACK) / NOTAS DE VOZ (FALLBACK) ---
 async def procesar_mensaje_alexis(
     message: str,
     cv_texto: str,
@@ -689,6 +689,7 @@ async def procesar_mensaje_alexis(
     os.environ["GROQ_API_KEY"] = api_key
     os.environ["OPENAI_API_KEY"] = api_key
 
+    # A. ANÁLISIS DE IMAGEN
     if image_base64:
         try:
             gemini_key = os.getenv("GEMINI_API_KEY")
@@ -705,18 +706,23 @@ async def procesar_mensaje_alexis(
             return AssistantResponse(intent="IMAGE_ANALYSIS", response=f"Error en visión: {str(e)}")
 
     mensaje_lower = message.lower()
-    palabras_clima = ["tiempo", "clima", "temperatura", "grados", "lluvia", "meteorológico", "viento"]
-    palabras_calendario = ["calendario", "agenda", "reunión", "reunion", "cita", "agendar", "evento"]
-    palabras_gmail = ["correo", "correos", "email", "emails", "gmail", "inbox"]
+    palabras_clima = ["tiempo", "clima", "temperatura", "grados", "lluvia", "meteorológico", "soleado", "nublado", "viento"]
+    palabras_calendario = ["calendario", "agenda", "reunión", "reunion", "cita", "agendar", "evento", "recordatorio"]
+    palabras_gmail = ["correo", "correos", "email", "emails", "gmail", "bandeja de entrada", "inbox", "redactar", "mensaje"]
 
-    if any(palabra in mensaje_lower for palabra in palabras_clima):
+    # B. CLASIFICACIÓN DE INTENCIÓN
+    if any(p in mensaje_lower for p in palabras_clima):
         user_intent = "WEATHER"
-    elif any(palabra in mensaje_lower for palabra in palabras_calendario):
+    elif any(p in mensaje_lower for p in palabras_calendario):
         user_intent = "CALENDAR"
-    elif any(palabra in mensaje_lower for palabra in palabras_gmail):
+    elif any(p in mensaje_lower for p in palabras_gmail):
         user_intent = "GMAIL"
     else:
-        system_prompt = "Responde SOLO con: 'WEATHER', 'SEARCH', 'CV_OPTIMIZATION', 'DOMOTICS_CONTROL', 'CALENDAR', 'GMAIL', 'GENERAL_CHAT'."
+        system_prompt = (
+            "Eres el clasificador de intenciones de AI Alexis.\n"
+            "Responde ÚNICAMENTE con una de estas siete palabras en mayúsculas:\n"
+            "- 'WEATHER', 'SEARCH', 'CV_OPTIMIZATION', 'DOMOTICS_CONTROL', 'CALENDAR', 'GMAIL', 'GENERAL_CHAT'."
+        )
         classification = litellm.completion(
             model=TEXT_MODEL,
             api_key=api_key,
@@ -725,6 +731,7 @@ async def procesar_mensaje_alexis(
         )
         user_intent = re.sub(r'[^A-Z_]', '', classification.choices[0].message.content.strip().upper()) or "GENERAL_CHAT"
 
+    # C. EJECUCIÓN POR INTENCIÓN
     if "WEATHER" in user_intent:
         res_loc = litellm.completion(
             model=TEXT_MODEL,
@@ -733,7 +740,7 @@ async def procesar_mensaje_alexis(
             temperature=0.0
         )
         ubicacion = re.sub(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑ\s]', '', res_loc.choices[0].message.content.strip()) or "Vigo"
-        dias = 1 if "mañana" in message.lower() else 0
+        dias = 1 if ("mañana" in mensaje_lower or "manana" in mensaje_lower) else 0
         datos_clima = await consultar_clima_open_meteo(ubicacion, dias=dias)
         prompt_clima = f"Eres AI Alexis. Responde con estos datos en viñetas (*):\n{json.dumps(datos_clima, ensure_ascii=False)}\nConsulta: {message}"
         chat_res = litellm.completion(model=TEXT_MODEL, api_key=api_key, messages=[{"role": "user", "content": prompt_clima}])
@@ -745,6 +752,131 @@ async def procesar_mensaje_alexis(
         prompt_search = f"Eres AI Alexis (J.A.R.V.I.S.). FECHA: 2026. Responde con viñetas (*):\n{contexto_web}\nConsulta: {message}"
         chat_res = litellm.completion(model=TEXT_MODEL, api_key=api_key, messages=[{"role": "user", "content": prompt_search}])
         return AssistantResponse(intent="SEARCH", response=chat_res.choices[0].message.content)
+
+    elif "CALENDAR" in user_intent:
+        creds = GoogleWorkspaceService.get_credentials(user_id)
+        if not creds:
+            return AssistantResponse(
+                intent="CALENDAR",
+                response="⚠️ No tienes vinculada tu cuenta de Google Workspace. Conéctala desde la barra superior para gestionar tu agenda."
+            )
+
+        palabras_consulta = ["qué tengo", "que tengo", "cuáles", "cuales", "ver agenda", "listar", "próximos", "proximos", "tengo algo", "revisar agenda"]
+        es_consulta_explicita = any(q in mensaje_lower for q in palabras_consulta)
+        patron_crear = r'\b(crear|crea|añadir|añade|agrega|agendar|agenda|programa una|programa un|nuevo evento|nueva cita|nueva reunión)\b'
+        es_creacion = bool(re.search(patron_crear, mensaje_lower)) and not es_consulta_explicita
+
+        if es_creacion:
+            datos_ev = await extraer_datos_evento(message, api_key, tz_name=USER_TIMEZONE)
+            start_iso = datos_ev.get("start_time_iso") if datos_ev else None
+            end_iso = datos_ev.get("end_time_iso") if datos_ev else None
+
+            if not datos_ev or not validar_fecha_iso(start_iso) or not validar_fecha_iso(end_iso):
+                return AssistantResponse(
+                    intent="CALENDAR",
+                    response="No pude determinar una fecha u hora válida para agendar la cita. Especifica el día y la hora con claridad (por ejemplo: *mañana a las 10:00*)."
+                )
+
+            try:
+                nuevo_ev = GoogleWorkspaceService.create_event(
+                    user_id=user_id,
+                    summary=datos_ev.get("summary", "Cita de trabajo"),
+                    start_time_iso=start_iso,
+                    end_time_iso=end_iso,
+                    description=datos_ev.get("description", ""),
+                    timezone_str=USER_TIMEZONE
+                )
+                respuesta_texto = (
+                    f"📅 **Evento agendado con éxito**\n\n"
+                    f"* **Título:** {nuevo_ev.get('summary')}\n"
+                    f"* **Inicio:** `{nuevo_ev.get('start', {}).get('dateTime', start_iso)}`\n"
+                    f"* **Fin:** `{nuevo_ev.get('end', {}).get('dateTime', end_iso)}`\n"
+                    f"* **Enlace:** [Abrir en Google Calendar]({nuevo_ev.get('htmlLink')})"
+                )
+                return AssistantResponse(intent="CALENDAR", response=respuesta_texto)
+            except Exception as e:
+                return AssistantResponse(intent="CALENDAR", response=f"⚠️ Ocurrió un fallo en el servicio de Calendar: {str(e)}")
+        else:
+            try:
+                eventos = GoogleWorkspaceService.list_upcoming_events(user_id=user_id, max_results=6)
+                prompt_agenda = (
+                    "Eres AI Alexis. Presenta los próximos eventos de la agenda del usuario.\n"
+                    "Formato: lista con viñetas (*), negrita en títulos y fechas legibles en español.\n"
+                    "Si la lista está vacía, indica amablemente que la agenda está despejada.\n\n"
+                    f"EVENTOS OBTENIDOS:\n{json.dumps(eventos, ensure_ascii=False)}\n\nConsulta: {message}"
+                )
+                chat_res = litellm.completion(model=TEXT_MODEL, api_key=api_key, messages=[{"role": "user", "content": prompt_agenda}])
+                return AssistantResponse(intent="CALENDAR", response=chat_res.choices[0].message.content)
+            except Exception as e:
+                return AssistantResponse(intent="CALENDAR", response=f"⚠️ No pude consultar tu calendario: {str(e)}")
+
+    elif "GMAIL" in user_intent:
+        creds = GoogleWorkspaceService.get_credentials(user_id)
+        if not creds:
+            return AssistantResponse(
+                intent="GMAIL",
+                response="⚠️ Tu cuenta de Google no está conectada. Conéctala desde la barra superior para gestionar Gmail."
+            )
+
+        palabras_enviar = ["enviar", "manda", "envía", "redactar", "escribir", "borrador"]
+        es_envio_o_borrador = any(w in mensaje_lower for w in palabras_enviar)
+
+        if es_envio_o_borrador:
+            datos_mail = await extraer_datos_email(message, api_key)
+            destinatario = datos_mail.get("to") if datos_mail else None
+
+            if not datos_mail or not validar_email(destinatario):
+                return AssistantResponse(
+                    intent="GMAIL",
+                    response="Debes proporcionar una dirección de correo destinataria válida (ejemplo: `nombre@dominio.com`) para redactar o enviar el mensaje."
+                )
+
+            solo_borrador = "borrador" in mensaje_lower or "redacta" in mensaje_lower
+            asunto = datos_mail.get("subject", "Sin Asunto").strip() or "Sin Asunto"
+            cuerpo = datos_mail.get("body", "").strip()
+
+            try:
+                if solo_borrador:
+                    GoogleWorkspaceService.create_draft(
+                        user_id=user_id,
+                        to=destinatario,
+                        subject=asunto,
+                        body=cuerpo
+                    )
+                    resp = (
+                        f"✉️ **Borrador creado en Gmail**\n\n"
+                        f"* **Para:** `{destinatario}`\n"
+                        f"* **Asunto:** {asunto}\n"
+                        f"* **Cuerpo:** {cuerpo}"
+                    )
+                else:
+                    GoogleWorkspaceService.send_email(
+                        user_id=user_id,
+                        to=destinatario,
+                        subject=asunto,
+                        body=cuerpo
+                    )
+                    resp = (
+                        f"🚀 **Correo enviado exitosamente**\n\n"
+                        f"* **Destinatario:** `{destinatario}`\n"
+                        f"* **Asunto:** {asunto}"
+                    )
+                return AssistantResponse(intent="GMAIL", response=resp)
+            except Exception as e:
+                return AssistantResponse(intent="GMAIL", response=f"⚠️ Ocurrió un error con el servicio de Gmail: {str(e)}")
+        else:
+            try:
+                correos = GoogleWorkspaceService.list_unread_emails(user_id=user_id, max_results=5)
+                prompt_mails = (
+                    "Eres AI Alexis. Resume los correos no leídos del usuario.\n"
+                    "Formato: lista con viñetas (*), indicando remitente en negrita, fecha/hora entre paréntesis, asunto y un breve resumen del contenido.\n"
+                    "Si no hay correos no leídos, confirma que la bandeja está al día.\n\n"
+                    f"CORREOS NO LEÍDOS:\n{json.dumps(correos, ensure_ascii=False)}\n\nConsulta: {message}"
+                )
+                chat_res = litellm.completion(model=TEXT_MODEL, api_key=api_key, messages=[{"role": "user", "content": prompt_mails}])
+                return AssistantResponse(intent="GMAIL", response=chat_res.choices[0].message.content)
+            except Exception as e:
+                return AssistantResponse(intent="GMAIL", response=f"⚠️ No pude consultar tu bandeja de Gmail: {str(e)}")
 
     else:
         prompt_sistema = {
